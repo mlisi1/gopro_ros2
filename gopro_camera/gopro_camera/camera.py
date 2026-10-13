@@ -41,6 +41,11 @@ from gopro_camera.transports.base import Channel, ensure_private_file
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
+NO_WAKE = (
+    "without a BLE link nothing could wake the camera again (over USB its network interface "
+    "disappears while it sleeps; only the button or BLE wakes it); enable ble_sidechannel or set "
+    "allow_sleep_without_ble"
+)
 FAST_POLL_PERIOD = 0.1  # [s] status poll period while a command waits for a state change
 
 # RecordingEvent.msg constants (kept in sync by test_camera.py)
@@ -64,6 +69,8 @@ class CameraConfig:
     busy_wait_timeout: float = 5.0
     encoding_confirm_timeout: float = 10.0
     camera_clock_is_local: bool = True
+    # HERO13/USB: asleep, the USB network interface vanishes; without BLE nothing can wake the camera.
+    allow_sleep_without_ble: bool = False
 
 
 @dataclass
@@ -359,7 +366,9 @@ class GoProCamera:
                 except (GoProError, TimeoutError) as e:
                     logger.warning("stopping stream on disconnect failed: %s", e)
             self.stream_mode = ""
-            if reachable and sleep and not self.encoding:
+            if reachable and sleep and not self.encoding and not self._can_wake():
+                logger.warning("sleep on shutdown skipped: %s", NO_WAKE)
+            if reachable and sleep and not self.encoding and self._can_wake():
                 try:
                     await asyncio.wait_for(self._exec("sleep", lambda ch: ch.sleep()), 3.0)
                 except (GoProError, TimeoutError) as e:
@@ -976,10 +985,15 @@ class GoProCamera:
             pass
         return msg
 
+    def _can_wake(self) -> bool:
+        return self.ble is not None or self.cfg.allow_sleep_without_ble
+
     async def sleep(self) -> None:
         await self.ensure_connected()
         if self.encoding:
             raise CameraBusy("sleep refused: camera is encoding (it would stop the recording)", self.context())
+        if not self._can_wake():
+            raise NotSupported(f"sleep refused: {NO_WAKE}", self.context())
         await self._exec("sleep", lambda ch: ch.sleep())
         self.sleeping = True
         await self._stop_tasks()
@@ -1005,9 +1019,14 @@ class GoProCamera:
             raise NotSupported("stream: needs an HTTP transport (usb, wifi_ap or cohn)", self.context())
         if self.stream_mode:
             return f"{self.stream_mode} stream already active"
-        if self.encoding:
-            # The SDK's own stream helpers stop the shutter first; we refuse instead of killing a recording.
-            raise CameraBusy("stream: refusing to start while recording (it would stop the recording)", self.context())
+        if self.encoding and mode == "webcam":
+            # HERO13: webcam/start answers UNAVAILABLE (7) while recording; the SDK's stream helpers would
+            # stop the shutter first. The preview stream runs alongside a recording (verified over USB).
+            raise CameraBusy(
+                "webcam stream: unavailable while recording; use stream.mode 'preview' for a live view "
+                "during recording",
+                self.context(),
+            )
         if mode == "webcam":
             if "webcam_stream" not in self.features():
                 raise NotSupported(f"webcam stream not supported on {self.model_name} over {self.transport_name}")

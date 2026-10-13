@@ -178,8 +178,8 @@ async def measure_stream_latency(cam: Any, args: argparse.Namespace) -> dict[str
             shown = tc.unwrap(value, recv_ns // 1_000_000) / 1000 + lag
             lat.append(recv_ns / 1e9 - shown)
 
-    await cam.start_stream("webcam", None, None, args.stream_port, "TS")
-    rx = StreamReceiver(stream_url("webcam", "TS", args.stream_port, ""), None, on_frame)
+    await cam.start_stream(args.stream_mode, None, None, args.stream_port, "TS")
+    rx = StreamReceiver(stream_url(args.stream_mode, "TS", args.stream_port, ""), None, on_frame)
     rx.start()
     try:
         await asyncio.sleep(args.stream_latency)
@@ -317,6 +317,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-frames", type=int, default=30, help="frames searched per file for a readable clock")
     ap.add_argument("--stream-latency", type=float, default=0.0, help="also measure webcam latency for N seconds")
     ap.add_argument("--stream-port", type=int, default=8554)
+    ap.add_argument("--stream-mode", choices=("webcam", "preview"), default="webcam", help="stream to measure")
     ap.add_argument("--calibration-file", default=str(sc.USER_FILE))
     ap.add_argument("--out", default=f"~/gopro_media/calibration/{datetime.datetime.now():%Y%m%d_%H%M%S}")
     ap.add_argument("--keep-media", action="store_true", help="keep the downloaded MP4s")

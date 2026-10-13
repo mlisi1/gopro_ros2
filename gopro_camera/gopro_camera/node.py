@@ -110,6 +110,11 @@ PARAMS: list[tuple[str, Any, str]] = [
     ("on_connect.apply_settings", True, "apply settings.* parameters on configure"),
     ("stop_recording_on_deactivate", False, "stop an ongoing recording on lifecycle deactivate"),
     ("sleep_on_shutdown", False, "put the camera to sleep on shutdown (never while recording)"),
+    (
+        "allow_sleep_without_ble",
+        False,
+        "allow ~/sleep / sleep_on_shutdown without BLE: over USB the camera then needs its button to wake",
+    ),
     ("status.poll_rate", 1.0, "HTTP status poll rate [Hz] (BLE push used when available)"),
     ("status.use_ble_push", True, "use BLE push notifications for status when BLE is connected"),
     ("status.timeout", 3.0, "seconds per status query"),
@@ -387,6 +392,7 @@ class GoProNode(LifecycleNode):
             reconnect_backoff_max=float(self.p("reconnect.backoff_max")),
             link_loss_threshold=int(self.p("reconnect.link_loss_threshold")),
             camera_clock_is_local=self.p("media.camera_clock_is_local"),
+            allow_sleep_without_ble=self.p("allow_sleep_without_ble"),
         )
 
     def _settings_from_params(self) -> list[tuple[int, int]]:
@@ -797,6 +803,11 @@ class GoProNode(LifecycleNode):
     def _stamp(self, recv_ns: int) -> TimeMsg:
         return _time_msg(recv_ns - int(float(self.p("stream.latency_offset")) * 1e9))
 
+    def _video_format(self) -> str:
+        """foxglove CompressedVideo format of the stream: webcam is H.264, the HERO13 preview is H.265."""
+        codec = self._stream.codec if self._stream is not None else ""
+        return {"hevc": "h265", "": "h264"}.get(codec, codec)
+
     def _on_packet(self, data: bytes, keyframe: bool, recv_ns: int) -> None:
         if not self._active:
             return
@@ -807,12 +818,12 @@ class GoProNode(LifecycleNode):
             m.timestamp = stamp
             m.frame_id = frame_id
             m.data = data
-            m.format = "h264"
+            m.format = self._video_format()
         else:
             m = CompressedImage()
             m.header.stamp = stamp
             m.header.frame_id = frame_id
-            m.format = "h264"
+            m.format = self._video_format()
             m.data = data
         self._pub_h264.publish(m)
 

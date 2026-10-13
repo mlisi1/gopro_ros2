@@ -473,8 +473,8 @@ class MockCamera:
 
         @routes.get("/gopro/webcam/start")
         async def wc_start(_r: web.Request) -> web.Response:
-            if st.statuses[S.ENCODING]:
-                return ok({"status": st.webcam_status, "error": 4})
+            if st.statuses[S.ENCODING]:  # HERO13: HTTP 500 with WebcamError.UNAVAILABLE (7)
+                return ok({"status": st.webcam_status, "error": 7}, status=500)
             st.webcam_status = 2
             return ok({"status": st.webcam_status, "error": 0})
 

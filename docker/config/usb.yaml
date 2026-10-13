@@ -14,16 +14,18 @@
     keep_alive_period: 3.0
     stream:
       enabled: true
-      mode: webcam
-      protocol: TS
-      resolution: "1080p"
-      fov: "Linear"
+      # preview: 1080p HEVC live view that runs *alongside* SD recording (HERO13 over USB, verified).
+      # webcam: choosable resolution/FOV (H.264) but the camera cannot record while it is active.
+      mode: preview
+      protocol: TS               # webcam only: TS | RTSP
+      resolution: "1080p"        # webcam only
+      fov: "Linear"              # webcam only
       port: 8554
       publish_raw: true
       publish_h264: true
       max_rate: 10.0
       scale: 0.5
-      latency_offset: 0.69     # HERO13/USB webcam, measured with gopro-calibrate-sync; re-measure for your setup
+      latency_offset: 0.69     # measured for the HERO13/USB *webcam*; measure preview: gopro-calibrate-sync --n 0 --stream-latency 20 --stream-mode preview
     camera_info_url: ""        # e.g. file:///home/robot/calib/gopro_1080p_linear.yaml
     media:
       download_dir: ~/gopro_media

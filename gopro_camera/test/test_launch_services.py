@@ -82,6 +82,7 @@ def generate_test_description():
                 "media.download_dir": DOWNLOAD_DIR,
                 "media.offload": "copy",
                 "media.offload_settle_s": 1.0,
+                "allow_sleep_without_ble": True,  # the fake camera can be "woken" over HTTP
                 "status.poll_rate": 5.0,
                 "status.publish_rate": 5.0,
                 "settings.video_resolution": "4K",

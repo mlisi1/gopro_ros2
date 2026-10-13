@@ -25,6 +25,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 READ_TIMEOUT = 2.0  # seconds without data before PyAV gives up a read (and we reopen / notice stop)
+# Bound FFmpeg's stream analysis. The HERO13 preview carries HEVC plus audio and an unidentified data
+# stream at ~3 Mbit/s while recording; with the default probe (5 MB) opening took ~15 s, with this ~2 s.
+UDP_PROBE = {"probesize": "500000", "analyzeduration": "1000000"}
 
 PacketCb = Callable[[bytes, bool, int], None]  # data (Annex-B), keyframe, receive time ns
 FrameCb = Callable[[Any, int], None]  # ndarray (H, W, 3) bgr24, receive time ns
@@ -74,6 +77,7 @@ class StreamReceiver:
         self._container: Any = None
         self.width = 0
         self.height = 0
+        self.codec = ""  # FFmpeg codec name of the video stream once open: "h264", "hevc", ...
 
     @property
     def running(self) -> bool:
@@ -105,7 +109,7 @@ class StreamReceiver:
 
         while not self._stop.is_set():
             try:
-                options = {"rtsp_transport": "tcp"} if self.url.startswith("rtsp") else {}
+                options = {"rtsp_transport": "tcp"} if self.url.startswith("rtsp") else dict(UDP_PROBE)
                 self._container = av.open(self.url, options=options, timeout=(self.open_timeout, READ_TIMEOUT))
                 self._demux(self._container)
             except Exception as e:  # av.error.* / OSError: retry until stopped
@@ -124,6 +128,7 @@ class StreamReceiver:
 
     def _demux(self, container: Any) -> None:
         vstream = container.streams.video[0]
+        self.codec = vstream.codec_context.name if vstream.codec_context else ""
         vstream.thread_type = "AUTO"
         frame_dur = None
         if vstream.average_rate and vstream.time_base:

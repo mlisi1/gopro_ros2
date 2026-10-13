@@ -47,7 +47,7 @@ Select with the `transport` parameter: `usb | wifi_ap | cohn | ble | auto` (`aut
 
 | Transport | Control / settings | Status | Record | Stream | Media | Notes |
 |---|---|---|---|---|---|---|
-| `usb` | HTTP | HTTP poll (or BLE push with side channel) | yes | webcam | yes (fast) | powers the camera; camera IP `172.2X.1YZ.51` from serial |
+| `usb` | HTTP | HTTP poll (or BLE push with side channel) | yes | preview (also *during* recording) or webcam (not while recording) | yes (fast) | powers the camera; camera IP `172.2X.1YZ.51` from serial |
 | `wifi_ap` | HTTP (+BLE) | BLE push | yes | preview (webcam only on HERO12+) | yes | host joins camera AP via nmcli; slow, short range |
 | `cohn` | HTTPS + basic auth | HTTP poll (or BLE push) | yes | webcam (per model) | yes | camera joins the robot network; provision once |
 | `ble` | BLE | BLE push | yes | no | no | low bandwidth; ideal side channel |
@@ -144,9 +144,11 @@ Progress: `~/status` (`offload_mode`, `offload_pending`, `offload_failed`, `offl
 - **activate**: publish status/images; start the stream if `stream.enabled`.
 - **deactivate**: stop the stream; an ongoing recording continues unless `stop_recording_on_deactivate`.
 - **cleanup/shutdown**: release control and disconnect (`sleep_on_shutdown` optional; never while recording).
+
+**Sleep needs BLE to wake.** On a HERO13 over USB the camera's USB network interface disappears while it sleeps, so no request can reach it: only its button or a BLE connection wakes it. `~/sleep` and `sleep_on_shutdown` are therefore refused without a BLE link unless `allow_sleep_without_ble: true` (then wake it by hand).
 - **link loss**: diagnostics error, reconnect with exponential backoff; after reconnecting, a running recording is detected and *adopted* (ADOPTED event).
 
-**Recording is never stopped by the driver on its own**: not on crash, restart, deactivate, sleep requests or stream start (the SDK's stream helpers stop the shutter first; the driver refuses instead).
+**Recording is never stopped by the driver on its own**: not on crash, restart, deactivate, sleep requests or stream start (the SDK's stream helpers stop the shutter first; the driver never does: a webcam start is refused while recording, the preview stream runs alongside it).
 
 ## Time synchronisation model
 
@@ -166,12 +168,16 @@ The start offset depends on the camera configuration (model, firmware, frame rat
    ```
 3. Open `http://localhost:8765/` on a screen of the same host, full screen, and point the camera at it (the three markers large in the frame, no glare); press Enter.
 
-The page shows the host clock as three ArUco markers (seconds, milliseconds, checksum), redrawn every display refresh. The tool records `--n` short videos, decodes the clock in the first frames of each, and reports *first frame - ack* per recording, then saves mean and uncertainty (2 sd combined with `--display-lag-uncertainty-ms`, default 20 ms: the monitor shows each value slightly late; pass `--display-lag-ms` if you know your display's lag). `--stream-latency N` also measures the webcam stream latency for N seconds and prints the value for `stream.latency_offset`. Details per run go to `~/gopro_media/calibration/<date>/` (`recordings.csv` with outliers marked, `summary.json`). The offset is the median over recordings; an occasional late ack (> 4 robust sd from the median) is excluded and listed.
+The page shows the host clock as three ArUco markers (seconds, milliseconds, checksum), redrawn every display refresh. The tool records `--n` short videos, decodes the clock in the first frames of each, and reports *first frame - ack* per recording, then saves mean and uncertainty (2 sd combined with `--display-lag-uncertainty-ms`, default 20 ms: the monitor shows each value slightly late; pass `--display-lag-ms` if you know your display's lag). `--stream-latency N` also measures the stream latency (`--stream-mode webcam|preview`) for N seconds and prints the value for `stream.latency_offset`. Details per run go to `~/gopro_media/calibration/<date>/` (`recordings.csv` with outliers marked, `summary.json`). The offset is the median over recordings; an occasional late ack (> 4 robust sd from the median) is excluded and listed.
 
 ## Live stream
 
-Webcam mode (USB/COHN; over Wi-Fi only on HERO12+ per the spec) or preview (Wi-Fi AP). H.264 in MPEG-TS over UDP (or RTSP) is received with PyAV:
-- `~/image_h264`: access units as received, no decoding, cheap to bag.
+Two modes (`stream.mode`), received from MPEG-TS over UDP (or RTSP) with PyAV:
+- **`preview`**: runs **alongside a recording to the SD** (HERO13 over USB: 1080p HEVC, ~30 fps, first frame after ~2 s, verified in both orders: record then preview, preview then record). Resolution/FOV are not selectable. Also the Wi-Fi AP stream.
+- **`webcam`** (USB/COHN; over Wi-Fi only on HERO12+ per the spec): H.264, selectable resolution/FOV, but the camera cannot record while it is active.
+
+Outputs:
+- `~/image_h264`: access units as received, no decoding, cheap to bag. Despite the name its `format` is the actual codec: `h264` (webcam) or `h265` (HERO13 preview).
 - `~/image_raw`: decoded, optionally downscaled (`stream.scale`) and rate-limited (`stream.max_rate`).
 - `~/camera_info`: from `camera_info_url`, rescaled to the published size.
 
@@ -240,7 +246,8 @@ The `driver` service uses host networking (the USB NCM link, COHN and the UDP st
 - The SDK's HTTP layer is blocking (`requests`); the driver runs it in worker threads. When the camera is unreachable, the SDK retries for up to ~10 s per request, so link-loss detection takes about `reconnect.link_loss_threshold × status.timeout`.
 - `open_gopro` 0.22 does not wrap every endpoint of the current spec (e.g. hilight-while-recording and sleep over HTTP, settings newer than the SDK); the driver sends those through the SDK's HTTP transport. Settings unknown to the SDK cannot be set over BLE. All uses of SDK internals live in `gopro_camera/transports/sdk_compat.py` (each with its reason) and are checked, with the public SDK API the driver calls, when a transport opens: an SDK upgrade that moves something fails with one message naming what is missing (`test_sdk_compat.py` checks the same in CI).
 - HTTP has no per-setting capability query; runtime option validation uses BLE capabilities when BLE is connected, otherwise the spec's per-model table plus the camera's 403 answers.
-- Webcam and recording are mutually exclusive; preview/webcam start is refused while recording.
+- Over USB alone a sleeping camera cannot be woken (its USB network interface disappears); use the BLE side channel or the button.
+- Webcam mode and recording are mutually exclusive (the camera answers `UNAVAILABLE` to a webcam start while recording). For live view during a recording use `stream.mode: preview` (HERO13 over USB: 1080p HEVC, ~30 fps, no drops in testing, opens in ~2 s; resolution/FOV not selectable).
 - Camera media timestamps are local wall-clock time without zone (`media.camera_clock_is_local`).
 - No OTA updates, no hardware trigger/PPS (non-goals).
 

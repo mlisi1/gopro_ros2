@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from gopro_camera.errors import CameraBusy, CameraRejected, InvalidSetting
+from gopro_camera.errors import CameraBusy, CameraRejected, InvalidSetting, NotSupported
 from gopro_camera.settings_map import SETTING_BY_NAME
 from gopro_camera.status import S
 
@@ -232,6 +232,27 @@ def test_webcam_refused_while_recording(make_camera, mock_cam):
     run(go())
 
 
+def test_preview_stream_alongside_recording(make_camera, mock_cam):
+    """HERO13/USB: the preview stream runs while recording (live view + SD), in either order."""
+    cam, _ = make_camera()
+
+    async def go():
+        await cam.connect()
+        await cam.start_recording()
+        assert "started" in await cam.start_stream("preview", None, None, 8556, None)
+        assert mock_cam.state.preview_on and mock_cam.state.statuses[S.ENCODING] == 1
+        await cam.stop_stream()
+        await cam.stop_recording()
+        assert "started" in await cam.start_stream("preview", None, None, 8556, None)
+        assert (await cam.start_recording()).success  # recording while previewing
+        await cam.stop_recording()
+        await cam.stop_stream()
+        assert not mock_cam.state.preview_on
+        await cam.disconnect()
+
+    run(go())
+
+
 def test_link_loss_and_reconnect_keeps_recording(make_camera, mock_cam):
     cam, rec = make_camera()
 
@@ -258,8 +279,23 @@ def test_link_loss_and_reconnect_keeps_recording(make_camera, mock_cam):
     assert any(e.event == camera_mod.EV_ADOPTED for e in rec.events)
 
 
-def test_sleep_refused_while_encoding_then_sleeps(make_camera, mock_cam):
+def test_sleep_refused_without_ble(make_camera, mock_cam):
+    """Over USB alone a sleeping camera cannot be woken (its network interface disappears)."""
     cam, _ = make_camera()
+
+    async def go():
+        await cam.connect()
+        with pytest.raises(NotSupported, match="BLE"):
+            await cam.sleep()
+        assert not mock_cam.state.asleep and cam.connected
+        await cam.disconnect(sleep=True)  # sleep_on_shutdown: skipped, camera stays awake
+        assert not mock_cam.state.asleep
+
+    run(go())
+
+
+def test_sleep_refused_while_encoding_then_sleeps(make_camera, mock_cam):
+    cam, _ = make_camera(allow_sleep_without_ble=True)
 
     async def go():
         await cam.connect()
