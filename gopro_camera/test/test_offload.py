@@ -30,7 +30,14 @@ def mp4_bytes(tmp_path_factory) -> bytes:
 
 def _offloader(cam, dest: Path, mode: str = "copy", **kw) -> Offloader:
     cfg = OffloadConfig(
-        mode=mode, dest=dest, min_free_bytes=0, retry_backoff=(0.2,), idle_poll=0.05, max_attempts=2, **kw
+        mode=mode,
+        dest=dest,
+        min_free_bytes=0,
+        retry_backoff=(0.2,),
+        idle_poll=0.05,
+        max_attempts=2,
+        settle_s=kw.pop("settle_s", 0.0),
+        **kw,
     )
     off = Offloader(cam, cfg, "C3501324500123")
     cam.offloader = off
@@ -127,6 +134,26 @@ def test_corrupt_copy_never_deletes_sd(make_camera, mock_cam, tmp_path: Path, mp
     assert not (tmp_path / path).exists()  # bad local copy removed
     entry = _journal(off)[path]
     assert entry["state"] == "failed" and "verification failed" in entry["error"]
+
+
+def test_waits_for_the_camera_to_settle_after_a_recording(make_camera, mock_cam, tmp_path: Path, mp4_bytes):
+    """No SD read within settle_s of the camera becoming idle (it is still finishing the file)."""
+    mock_cam.state.video_template = mp4_bytes
+    cam, _ = make_camera()
+
+    async def go():
+        await cam.connect()
+        off = _offloader(cam, tmp_path, "copy", settle_s=1.5)
+        path = await _record(cam)
+        stopped = asyncio.get_running_loop().time()
+        await _until(lambda: off.current == path or off.summary()["done"] == 1)
+        waited = asyncio.get_running_loop().time() - stopped
+        await _until(lambda: off.summary()["done"] == 1)
+        await off.stop()
+        await cam.disconnect()
+        return waited
+
+    assert asyncio.run(go()) >= 1.4
 
 
 def test_never_reads_sd_while_recording(make_camera, mock_cam, tmp_path: Path, mp4_bytes: bytes):

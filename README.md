@@ -132,6 +132,7 @@ Safety rules (`gopro_camera/offload.py`):
 - **Verification**: local size equal to the SD's, and for videos the MP4 must open with a video track of positive duration. A bad copy is removed and retried; the SD file stays.
 - **`move` deletes only what it verified**: the journal records the file as verified (fsynced) *before* deleting it from the SD; after a restart it is re-verified first. Only recordings that finished while the driver ran are ever deleted; older footage on the card is never touched. A crash, kill or power loss at any point before the delete leaves the SD file in place.
 - **Journal** `<dest>/.gopro_offload_<serial>.json`: unfinished transfers resume after a restart; failures are retried with backoff (and again on the next start). All chapters of a long recording (GX01…, GX02…) are transferred.
+- **Settle time**: a transfer starts only after the camera has been idle for `media.offload_settle_s` (default 10 s). A HERO13 keeps finishing a file for a few seconds after it reports the end of encoding; downloading it right away stalled the camera's HTTP server for up to ~4 s (status polls timed out), while with a 10 s settle no request failed.
 - **Disk space**: a transfer waits while the local disk would drop below `media.offload_min_free_gb`.
 
 Progress: `~/status` (`offload_mode`, `offload_pending`, `offload_failed`, `offload_current`) and the `gopro offload` diagnostic. The mode can be changed at runtime (`ros2 param set … media.offload move`); files queued under `copy` are never deleted later.

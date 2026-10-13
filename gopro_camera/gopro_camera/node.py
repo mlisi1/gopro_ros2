@@ -140,6 +140,7 @@ PARAMS: list[tuple[str, Any, str]] = [
     ),
     ("media.offload_dir", "", "where offloaded files go; empty = media.download_dir"),
     ("media.offload_min_free_gb", 5.0, "local disk space to keep free; transfers wait otherwise"),
+    ("media.offload_settle_s", 10.0, "camera idle this long before a transfer (it finishes writing the file)"),
     ("media.camera_clock_is_local", True, "camera media timestamps are local wall time (GoPro default)"),
     ("diagnostics.running_on_battery", True, "battery warnings only matter when not powered by USB"),
     ("diagnostics.battery_warn_percent", 20, ""),
@@ -161,6 +162,7 @@ LIVE_PARAMS = {
     "media.download_dir",
     "media.offload",
     "media.offload_min_free_gb",
+    "media.offload_settle_s",
     "reconnect.enabled",
     "reconnect.backoff_max",
     "on_connect.sync_datetime",
@@ -568,6 +570,7 @@ class GoProNode(LifecycleNode):
             mode=_offload_mode(self.p("media.offload")),
             dest=Path(dest).expanduser(),
             min_free_bytes=int(float(self.p("media.offload_min_free_gb")) * 1e9),
+            settle_s=float(self.p("media.offload_settle_s")),
         )
         if cfg.mode not in OFFLOAD_MODES:
             self.get_logger().error(f"media.offload '{cfg.mode}' invalid (expected {OFFLOAD_MODES}); offload is off")
@@ -744,6 +747,8 @@ class GoProNode(LifecycleNode):
                     self._bridge.loop.call_soon_threadsafe(off.wake)  # asyncio objects: camera loop only
                 elif prm.name == "media.offload_min_free_gb":
                     off.cfg.min_free_bytes = int(float(prm.value) * 1e9)
+                elif prm.name == "media.offload_settle_s":
+                    off.cfg.settle_s = float(prm.value)
             if prm.name == "status.publish_rate" and float(prm.value) > 0:
                 self._status_timer.timer_period_ns = int(1e9 / float(prm.value))
                 self._status_timer.reset()

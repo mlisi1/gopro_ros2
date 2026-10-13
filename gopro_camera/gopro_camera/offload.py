@@ -2,8 +2,11 @@
 
 The SD card holds the master copy until a verified local copy exists. Rules:
 
-1. **Never while the camera records.** Transfers run only when the camera is idle (connected, fresh
-   status, not encoding, not busy, no capture command in flight). ``start_recording`` /
+1. **Never while the camera records.** Transfers run only when the camera has been idle (connected,
+   fresh status, not encoding, not busy, no capture command in flight) for ``settle_s``: a HERO13
+   keeps finishing a file for a few seconds after it reports encoding 0, and reading it then stalls
+   the camera's HTTP server for seconds (measured over USB: up to ~4 s of unanswered requests; none
+   with a 10 s settle). ``start_recording`` /
    ``take_photo`` / ``start_livestream`` first stop a running transfer (:meth:`Offloader.hold`); a
    start from the camera button is seen by the next status sample and stops it within a poll period.
    Reading the SD while it writes high-bitrate video could trip the camera's SD-speed error.
@@ -58,6 +61,7 @@ class OffloadConfig:
     hold_timeout: float = 10.0  # max wait for a transfer to stop before a capture command proceeds
     idle_poll: float = 0.5
     max_status_age: float = 5.0  # do not trust an older "not encoding"
+    settle_s: float = 10.0  # camera idle this long before reading the SD (file finalisation, see above)
 
 
 @dataclass
@@ -87,6 +91,7 @@ class Offloader:
         self._wake: asyncio.Event | None = None
         self._processing: asyncio.Event | None = None  # set while a file is being handled
         self._sd_active = False  # the SD card is being read (download) or written (delete) right now
+        self._idle_since: float | None = None  # monotonic time the camera was first seen idle
         self._task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ public (camera loop)
@@ -178,7 +183,7 @@ class Offloader:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._wake.wait(), timeout)
                 continue
-            if not self._idle():
+            if not self._settled():
                 await asyncio.sleep(self.cfg.idle_poll)
                 continue
             self._processing.set()
@@ -207,6 +212,15 @@ class Offloader:
             and not as_flag(st.get(S.BUSY))
             and not cam.capture_pending
         )
+
+    def _settled(self) -> bool:
+        """Idle continuously for settle_s (the camera finishes writing a file after encoding ends)."""
+        if not self._idle():
+            self._idle_since = None
+            return False
+        if self._idle_since is None:
+            self._idle_since = time.monotonic()
+        return time.monotonic() - self._idle_since >= self.cfg.settle_s
 
     def _should_stop(self) -> bool:
         """Download thread: stop at the next chunk if a capture is coming or the camera records."""

@@ -103,8 +103,9 @@ async def record_and_measure(cam: Any, args: argparse.Namespace, out: Path) -> l
         if not (start.success and stop.success and stop.filename):
             log.error("[%d] recording failed: %s / %s", i, start.message, stop.message)
             continue
-        # No turbo transfer: files are small, and toggling it around every download made the camera's
-        # HTTP server stop accepting connections for a few seconds (HERO13/USB).
+        # A HERO13 keeps finishing a file for a few seconds after it reports encoding 0; reading it then
+        # stalls the camera's HTTP server for seconds (status polls time out). Wait before downloading.
+        await asyncio.sleep(args.settle)
         ok, failed = await cam.download_media([stop.filename], out / "media", turbo=False)
         if failed or not ok:
             log.error("[%d] download of %s failed", i, stop.filename)
@@ -309,6 +310,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--n", type=int, default=10, help="number of recordings (0 = only stream latency)")
     ap.add_argument("--duration", type=float, default=2.0, help="seconds per recording")
     ap.add_argument("--pause", type=float, default=2.0, help="seconds between recordings")
+    ap.add_argument("--settle", type=float, default=10.0, help="wait after each stop before downloading")
     ap.add_argument("--port", type=int, default=8765, help="port of the clock page")
     ap.add_argument("--display-lag-ms", type=float, default=0.0, help="known monitor lag, added to shown times")
     ap.add_argument("--display-lag-uncertainty-ms", type=float, default=20.0)
