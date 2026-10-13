@@ -45,6 +45,28 @@ MOCK = MockCamera()
 DOWNLOAD_DIR = tempfile.mkdtemp(prefix="gopro_dl_")
 
 
+def _small_mp4() -> bytes:
+    """Real MP4 content for new recordings, so media.offload can verify its copies."""
+    import av
+    import numpy as np
+
+    path = os.path.join(tempfile.mkdtemp(prefix="gopro_mp4_"), "v.mp4")
+    with av.open(path, "w") as c:
+        vs = c.add_stream("mpeg4", rate=10)
+        vs.width, vs.height, vs.pix_fmt = 64, 48, "yuv420p"
+        for i in range(10):
+            frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), i * 20, np.uint8), format="rgb24")
+            for pkt in vs.encode(frame):
+                c.mux(pkt)
+        for pkt in vs.encode():
+            c.mux(pkt)
+    with open(path, "rb") as f:
+        return f.read()
+
+
+MOCK.state.video_template = _small_mp4()
+
+
 @pytest.mark.launch_test
 def generate_test_description():
     url = MOCK.start()
@@ -58,6 +80,7 @@ def generate_test_description():
                 "transport": "usb",
                 "usb_base_url": url,
                 "media.download_dir": DOWNLOAD_DIR,
+                "media.offload": "copy",
                 "status.poll_rate": 5.0,
                 "status.publish_rate": 5.0,
                 "settings.video_resolution": "4K",
@@ -182,6 +205,16 @@ class TestServices(unittest.TestCase):
         self.assertEqual(
             [e.event for e in events][:3], [RecordingEvent.START, RecordingEvent.HILIGHT, RecordingEvent.STOP]
         )
+        # media.offload: copy -> the finished recording lands in the download dir, and stays on the SD
+        video = r.event.filename
+        local = os.path.join(DOWNLOAD_DIR, video)
+        end = time.time() + 15
+        while time.time() < end and not os.path.exists(local):
+            rclpy.spin_once(self.node, timeout_sec=0.2)
+        self.assertTrue(os.path.exists(local), f"{video} not offloaded")
+        self.assertIn(video, MOCK.state.files)
+        st = self.wait_for_msg(Status, f"{NS}/status", predicate=lambda m: m.offload_mode == "copy")
+        self.assertIsNotNone(st)
 
         r = self.call(Capture, "take_photo")
         self.assertFalse(r.success)  # video preset active

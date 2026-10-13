@@ -116,6 +116,26 @@ All setting/status IDs and options come from `gopro_camera/spec_tables.py`, gene
 python3 gopro_camera/scripts/generate_spec_tables.py   # downloads https://gopro.github.io/OpenGoPro/http/openapi.json
 ```
 
+### Media offload (SD → local disk)
+
+`media.offload` copies every recording (and photo) the driver sees finish to `media.offload_dir` (default `media.download_dir`, keeping the camera folder structure), right after it ends:
+
+| `media.offload` | SD card | local disk |
+|---|---|---|
+| `off` (default) | keeps the file | nothing |
+| `copy` | keeps the file | verified copy |
+| `move` | file deleted **after** the local copy is verified | verified copy |
+
+Safety rules (`gopro_camera/offload.py`):
+- **Never while recording.** Transfers run only when the camera is idle. `start_recording`/`take_photo` stop a running transfer *before* sending the shutter command; a start from the camera button stops it at the next status sample (≤ one poll period). Reading the SD while it writes high-bitrate video could trip the camera's SD-speed error.
+- **Atomic local files**: data goes to `<file>.part`, is fsynced and only then renamed; a file with its final name is complete.
+- **Verification**: local size equal to the SD's, and for videos the MP4 must open with a video track of positive duration. A bad copy is removed and retried; the SD file stays.
+- **`move` deletes only what it verified**: the journal records the file as verified (fsynced) *before* deleting it from the SD; after a restart it is re-verified first. Only recordings that finished while the driver ran are ever deleted; older footage on the card is never touched. A crash, kill or power loss at any point before the delete leaves the SD file in place.
+- **Journal** `<dest>/.gopro_offload_<serial>.json`: unfinished transfers resume after a restart; failures are retried with backoff (and again on the next start). All chapters of a long recording (GX01…, GX02…) are transferred.
+- **Disk space**: a transfer waits while the local disk would drop below `media.offload_min_free_gb`.
+
+Progress: `~/status` (`offload_mode`, `offload_pending`, `offload_failed`, `offload_current`) and the `gopro offload` diagnostic. The mode can be changed at runtime (`ros2 param set … media.offload move`); files queued under `copy` are never deleted later.
+
 ### Lifecycle
 
 `autostart: true` (default) configures and activates at startup, retrying every `autostart_retry_period` until the camera is reachable. Otherwise drive it with `ros2 lifecycle set`.

@@ -26,6 +26,7 @@ from gopro_camera.errors import (
     CameraBusy,
     CameraRejected,
     CommandTimeout,
+    DownloadCancelled,
     GoProError,
     InvalidSetting,
     NotConnected,
@@ -197,6 +198,7 @@ class GoProCamera:
         self.last_command_transport = ""
         self._next_sidechannel_try = 0.0
         self._side_tasks: set[asyncio.Task[Any]] = set()
+        self.offloader: Any = None  # gopro_camera.offload.Offloader when media.offload is used
 
     # ================================================================== properties
     @property
@@ -218,6 +220,11 @@ class GoProCamera:
     @property
     def busy(self) -> bool:
         return as_flag(self.statuses.get(S.BUSY))
+
+    @property
+    def capture_pending(self) -> bool:
+        """A capture command is in flight (the camera may start writing to the SD any moment)."""
+        return self._expected_encoding is not None
 
     @property
     def model_name(self) -> str:
@@ -677,6 +684,18 @@ class GoProCamera:
             self.listener.on_recording_event(self, ev)
         except Exception:
             logger.exception("recording event listener failed")
+        finished = ev.event in (EV_STOP, EV_EXTERNAL_STOP, EV_PHOTO)
+        if self.offloader is not None and finished and ev.success and ev.filename:
+            self.offloader.enqueue(ev.filename)
+
+    async def _hold_offload(self) -> None:
+        """Stop SD transfers before a capture: the SD card must not be read while recording starts."""
+        if self.offloader is not None:
+            await self.offloader.hold()
+
+    def _release_offload(self) -> None:
+        if self.offloader is not None:
+            self.offloader.release()
 
     async def _emit_with_filename(self, ev: RecordingEventData) -> None:
         ev.filename = await self._last_captured_retry()
@@ -727,6 +746,7 @@ class GoProCamera:
         self._check_sd("start recording")
         await self._require_idle("start recording")
         ev = RecordingEventData(event=EV_START)
+        await self._hold_offload()
         self._begin_fast_poll(self._capture_poll_window())
         self._expected_encoding = True
         try:
@@ -737,6 +757,7 @@ class GoProCamera:
         finally:
             self._expected_encoding = None
             self._end_fast_poll()
+            self._release_offload()
         if obs is None:
             ev.success = False
             ev.message = f"camera acknowledged but encoding not observed within {self.cfg.encoding_confirm_timeout}s"
@@ -761,6 +782,7 @@ class GoProCamera:
         finally:
             self._expected_encoding = None
             self._end_fast_poll()
+            self._release_offload()
         ev.encoding_duration = self._last_encoding_duration
         if obs is None:
             ev.success = False
@@ -782,6 +804,7 @@ class GoProCamera:
         self._check_sd("take photo")
         await self._require_idle("take photo")
         ev = RecordingEventData(event=EV_PHOTO)
+        await self._hold_offload()
         self._begin_fast_poll(self._capture_poll_window())
         self._expected_encoding = True
         try:
@@ -796,6 +819,7 @@ class GoProCamera:
         finally:
             self._expected_encoding = None
             self._end_fast_poll()
+            self._release_offload()
         ev.message = "photo captured" if obs is not None else "camera acknowledged; capture not observed"
         ev.success = obs is not None
         ev.filename = await self._last_captured_retry()
@@ -1057,12 +1081,14 @@ class GoProCamera:
         ready = int(proto.EnumLiveStreamStatus.LIVE_STREAM_STATE_READY)
         streaming = int(proto.EnumLiveStreamStatus.LIVE_STREAM_STATE_STREAMING)
         await self._wait_livestream({ready, streaming}, timeout, "ready (is the camera connected to a network?)")
+        await self._hold_offload()
         self._expected_encoding = True
         try:
             await self.ble.set_shutter(True)
             await self._wait_livestream({streaming}, timeout, "streaming")
         finally:
             self._expected_encoding = None
+            self._release_offload()
         self.livestream_active = True
         return f"livestreaming to {url}"
 
@@ -1228,7 +1254,7 @@ class GoProCamera:
                 try:
                     await http.download(p, local, _prog, cancelled)
                     downloaded.append(str(local))
-                except asyncio.CancelledError:
+                except DownloadCancelled:  # cancelled() callback; a cancelled *task* propagates
                     break
                 except GoProError as e:
                     logger.error("download %s failed: %s", p, e)

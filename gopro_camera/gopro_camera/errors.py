@@ -46,3 +46,10 @@ class InvalidSetting(GoProError):
 
 class NotSupported(GoProError):
     """The feature is not available on this camera model or with the active transports."""
+
+
+class DownloadCancelled(GoProError):
+    """A download was stopped by its ``cancelled()`` callback (user request, or a capture starting).
+
+    Distinct from ``asyncio.CancelledError``, which means the calling task itself is being cancelled.
+    """

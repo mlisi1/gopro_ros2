@@ -70,3 +70,9 @@ bool livestream_active
 # --- every numeric status the camera reported, for forward compatibility ---
 int32[] raw_status_ids
 int64[] raw_status_values
+
+# Automatic SD -> local transfer (media.offload)
+string offload_mode          # off | copy | move
+uint32 offload_pending       # files waiting (transferred only while the camera is idle)
+uint32 offload_failed        # files that failed (kept on the SD; retried after a restart)
+string offload_current       # camera path being transferred, empty if none

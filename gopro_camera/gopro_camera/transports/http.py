@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import os
 import threading
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -32,6 +33,7 @@ from typing import Any
 from gopro_camera.errors import (
     CameraRejected,
     CommandTimeout,
+    DownloadCancelled,
     InvalidSetting,
     NotConnected,
     TransportError,
@@ -77,6 +79,20 @@ def _in_daemon_thread(func: Callable[[], Any], name: str = "gopro-http") -> asyn
 
 
 ProgressCb = Callable[[int, int], None]
+
+
+def _fsync_dir(path: Path) -> None:
+    """Persist a rename: fsync the directory entry (POSIX)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _thread_run(factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
@@ -374,7 +390,10 @@ class HttpChannel(Channel):
         """Stream ``videos/DCIM/<path>`` to ``local`` with progress and cancellation.
 
         Uses the SDK's requests session and request arguments (COHN auth/cert), but iterates the body
-        itself because the SDK download helper has neither progress nor cancellation.
+        itself because the SDK download helper has neither progress nor cancellation. Data goes to
+        ``<local>.part``, is flushed to disk (fsync) and only then renamed to ``local``, so ``local``
+        never exists half-written, even after a crash or power loss. Raises DownloadCancelled when
+        ``cancelled()`` turns true (the file is removed); task cancellation propagates as usual.
         """
         from open_gopro.domain.communicator_interface import HttpMessage
 
@@ -389,14 +408,18 @@ class HttpChannel(Channel):
                 total = int(resp.headers.get("Content-Length", 0) or 0)
                 done = 0
                 with open(tmp, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                    # 64 KiB: cancellation (e.g. a capture starting) is checked often even on slow links
+                    for chunk in resp.iter_content(chunk_size=1 << 16):
                         if stop.is_set() or (cancelled is not None and cancelled()):
-                            raise asyncio.CancelledError
+                            raise DownloadCancelled(f"download {path} cancelled")
                         f.write(chunk)
                         done += len(chunk)
                         if progress is not None:
                             progress(done, total)
+                    f.flush()
+                    os.fsync(f.fileno())
             tmp.replace(local)
+            _fsync_dir(local.parent)
 
         lock = self._lock("media")
         assert lock is not None
@@ -410,6 +433,9 @@ class HttpChannel(Channel):
                 tmp.unlink(missing_ok=True)
                 if isinstance(e, TimeoutError):
                     raise CommandTimeout(f"download {path} timed out after {timeout:.0f}s") from e
+                raise
+            except DownloadCancelled:
+                tmp.unlink(missing_ok=True)
                 raise
             except Exception as e:
                 tmp.unlink(missing_ok=True)

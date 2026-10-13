@@ -27,6 +27,8 @@
     camera_info_url: ""        # e.g. file:///home/robot/calib/gopro_1080p_linear.yaml
     media:
       download_dir: ~/gopro_media
+      offload: "off"           # off | copy (SD + local copy) | move (local copy, then deleted from SD once verified)
+      offload_min_free_gb: 5.0   # transfers wait if the local disk would drop below this
     settings:                  # spec labels or option ids; unset = untouched
       video_resolution: "4K"
       frames_per_second: "30"

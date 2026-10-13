@@ -45,6 +45,8 @@ from gopro_camera.camera import CameraConfig, GoProCamera, RecordingEventData
 from gopro_camera.errors import GoProError, NotConnected
 from gopro_camera.loop_bridge import AsyncLoopThread
 from gopro_camera.media import to_camera_epoch
+from gopro_camera.offload import MODES as OFFLOAD_MODES
+from gopro_camera.offload import OffloadConfig, Offloader
 from gopro_camera.spec_tables import WEBCAM_PARAMS
 from gopro_camera.status import DiagThresholds, evaluate, raw_numeric, status_fields
 from gopro_camera.stream import StreamReceiver, load_calibration, scale_calibration, stream_url
@@ -130,6 +132,14 @@ PARAMS: list[tuple[str, Any, str]] = [
     ("stream.frame_id", "gopro_optical_frame", "frame_id of images and camera_info"),
     ("camera_info_url", "", "calibration YAML (file://, package:// or path); equidistant model"),
     ("media.download_dir", "~/gopro_media", "default download directory"),
+    (
+        "media.offload",
+        "off",
+        "after each recording, when the camera is idle: off | copy (SD + local copy) | "
+        "move (local copy, then deleted from the SD after verification)",
+    ),
+    ("media.offload_dir", "", "where offloaded files go; empty = media.download_dir"),
+    ("media.offload_min_free_gb", 5.0, "local disk space to keep free; transfers wait otherwise"),
     ("media.camera_clock_is_local", True, "camera media timestamps are local wall time (GoPro default)"),
     ("diagnostics.running_on_battery", True, "battery warnings only matter when not powered by USB"),
     ("diagnostics.battery_warn_percent", 20, ""),
@@ -149,6 +159,8 @@ LIVE_PARAMS = {
     "stream.publish_h264",
     "stream.frame_id",
     "media.download_dir",
+    "media.offload",
+    "media.offload_min_free_gb",
     "reconnect.enabled",
     "reconnect.backoff_max",
     "on_connect.sync_datetime",
@@ -176,6 +188,13 @@ def _ns(t: TimeMsg) -> int:
     return int(t.sec) * 1_000_000_000 + int(t.nanosec)
 
 
+def _offload_mode(value: Any) -> str:
+    """media.offload value -> off | copy | move (False from an unquoted YAML `off` means off)."""
+    if value is False or str(value).strip().lower() in ("off", "false", ""):
+        return "off"
+    return str(value).strip().lower()
+
+
 def _webcam_param(kind: str, value: str) -> int | None:
     value = str(value).strip()
     if not value:
@@ -194,7 +213,9 @@ class GoProNode(LifecycleNode):
     def __init__(self, node_name: str = "gopro_camera", **kwargs: Any) -> None:
         super().__init__(node_name, **kwargs)
         for name, default, desc in PARAMS:
-            self.declare_parameter(name, default, ParameterDescriptor(description=desc))
+            # media.offload: YAML reads an unquoted `off` as false, so accept a bool too
+            dyn = name == "media.offload"
+            self.declare_parameter(name, default, ParameterDescriptor(description=desc, dynamic_typing=dyn))
         for sdef in smap.SETTING_DEFS.values():
             self.declare_parameter(
                 sdef.param_name,
@@ -237,7 +258,7 @@ class GoProNode(LifecycleNode):
 
         self._diag = Updater(self)
         self._diag.setHardwareID("gopro (not connected)")
-        for item in ("link", "battery", "sd_card", "thermal", "stream"):
+        for item in ("link", "battery", "sd_card", "thermal", "stream", "offload"):
             self._diag.add(f"gopro {item}", lambda stat, _i=item: self._diag_task(stat, _i))
 
         self.create_subscription(
@@ -414,6 +435,10 @@ class GoProNode(LifecycleNode):
             return TransitionCallbackReturn.FAILURE
         log.info(f"connected: {cam.context()}")
         self._publish_hardware_info()
+        try:
+            self._run_sync(self._start_offloader(cam), 10)
+        except Exception as e:
+            self._err("start media offload", e)
         preset = str(self.p("on_connect.load_preset")).strip()
         if preset:
             if cam.encoding:
@@ -464,6 +489,12 @@ class GoProNode(LifecycleNode):
     def _teardown(self, sleep: bool) -> None:
         self._stop_receiver()
         cam = self._camera
+        if cam is not None and cam.offloader is not None:
+            try:  # an interrupted transfer leaves the SD file untouched and resumes next time
+                self._run_sync(cam.offloader.stop(), 10)
+            except Exception as e:
+                self._err("stop media offload", e)
+            cam.offloader = None
         if cam is not None:
             try:
                 self._run_sync(cam.disconnect(release_control=True, sleep=sleep), 30)
@@ -530,6 +561,23 @@ class GoProNode(LifecycleNode):
         m.encoding_duration = int(ev.encoding_duration)
         return m
 
+    async def _start_offloader(self, cam: GoProCamera) -> None:
+        """Runs on the camera loop. Created even when off, so a live switch to copy/move works."""
+        dest = str(self.p("media.offload_dir")) or str(self.p("media.download_dir"))
+        cfg = OffloadConfig(
+            mode=_offload_mode(self.p("media.offload")),
+            dest=Path(dest).expanduser(),
+            min_free_bytes=int(float(self.p("media.offload_min_free_gb")) * 1e9),
+        )
+        if cfg.mode not in OFFLOAD_MODES:
+            self.get_logger().error(f"media.offload '{cfg.mode}' invalid (expected {OFFLOAD_MODES}); offload is off")
+            cfg.mode = "off"
+        off = Offloader(cam, cfg, cam.serial)
+        cam.offloader = off
+        off.start()
+        if cfg.mode != "off":
+            self.get_logger().info(f"media offload: {cfg.mode} to {cfg.dest} (only while the camera is idle)")
+
     # ================================================================== status / diagnostics
     def _publish_status(self) -> None:
         cam = self._camera
@@ -552,10 +600,26 @@ class GoProNode(LifecycleNode):
         m.stream_mode = cam.stream_mode
         m.livestream_active = cam.livestream_active
         m.raw_status_ids, m.raw_status_values = raw_numeric(st)
+        if cam.offloader is not None:
+            o = cam.offloader.summary()
+            m.offload_mode, m.offload_pending, m.offload_failed = o["mode"], o["pending"], o["failed"]
+            m.offload_current = o["current"]
         self._pub_status.publish(m)
 
     def _diag_task(self, stat: DiagnosticStatusWrapper, item: str) -> DiagnosticStatusWrapper:
         cam = self._camera
+        if item == "offload":
+            off = cam.offloader if cam is not None else None
+            if off is None or off.mode == "off":
+                stat.summary(DiagnosticStatus.OK, "off")
+                return stat
+            o = off.summary()
+            level = DiagnosticStatus.WARN if o["failed"] or "disk space" in o["last_error"] else DiagnosticStatus.OK
+            busy = f"transferring {o['current']}" if o["current"] else "idle"
+            stat.summary(level, f"{o['mode']}: {busy}, {o['pending']} pending, {o['failed']} failed")
+            for k, v in o.items():
+                stat.add(k, str(v))
+            return stat
         if cam is None:
             stat.summary(DiagnosticStatus.WARN if item == "link" else DiagnosticStatus.OK, self._link_reason)
             return stat
@@ -636,6 +700,8 @@ class GoProNode(LifecycleNode):
                     setting_items.append((sdef.id, opt))
                 except GoProError as e:
                     return SetParametersResult(successful=False, reason=str(e))
+            elif prm.name == "media.offload" and _offload_mode(prm.value) not in OFFLOAD_MODES:
+                return SetParametersResult(successful=False, reason=f"media.offload must be one of {OFFLOAD_MODES}")
             elif prm.name in ("stream.resolution", "stream.fov"):
                 try:
                     _webcam_param("res" if prm.name.endswith("resolution") else "fov", prm.value)
@@ -671,6 +737,13 @@ class GoProNode(LifecycleNode):
                     rx.max_rate = float(prm.value)
                 elif prm.name == "stream.scale":
                     rx.scale = float(prm.value)
+            off = cam.offloader if cam is not None else None
+            if off is not None:
+                if prm.name == "media.offload":
+                    off.cfg.mode = _offload_mode(prm.value)
+                    self._bridge.loop.call_soon_threadsafe(off.wake)  # asyncio objects: camera loop only
+                elif prm.name == "media.offload_min_free_gb":
+                    off.cfg.min_free_bytes = int(float(prm.value) * 1e9)
             if prm.name == "status.publish_rate" and float(prm.value) > 0:
                 self._status_timer.timer_period_ns = int(1e9 / float(prm.value))
                 self._status_timer.reset()

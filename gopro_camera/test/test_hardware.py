@@ -125,6 +125,53 @@ def test_record_10s_hilight_and_download():
     run(go())
 
 
+def test_offload_copy_then_move():
+    """Records two short clips: the first is copied (stays on the SD), the second moved (deleted from
+    the SD after verification). Only files recorded by this test are ever deleted."""
+    from gopro_camera.offload import OffloadConfig, Offloader, verify_copy
+
+    cam = _camera()
+
+    async def record() -> str:
+        await cam.load_preset(group="video")
+        assert (await cam.start_recording()).success
+        await asyncio.sleep(3)
+        stop = await cam.stop_recording()
+        assert stop.success and stop.filename, stop.message
+        return stop.filename
+
+    async def until(pred, timeout=120.0):
+        end = time.monotonic() + timeout
+        while not pred():
+            assert time.monotonic() < end, "offload did not finish"
+            await asyncio.sleep(0.5)
+
+    async def go():
+        await cam.connect()
+        with tempfile.TemporaryDirectory() as d:
+            off = Offloader(cam, OffloadConfig(mode="copy", dest=Path(d), min_free_bytes=0), cam.serial)
+            cam.offloader = off
+            off.start()
+            try:
+                copied = await record()
+                await until(lambda: off.summary()["done"] == 1)
+                off.cfg.mode = "move"
+                moved = await record()
+                await until(lambda: off.summary()["done"] == 2)
+                on_sd = {m.path: m.size_bytes for m in await cam.list_media()}
+                assert copied in on_sd, "copy mode must keep the SD file"
+                assert moved not in on_sd, "move mode deletes the SD file after verification"
+                for p in (copied, moved):
+                    assert verify_copy(Path(d) / p, (Path(d) / p).stat().st_size)[0]
+                log.info(f"offload: copied {copied} (kept on SD), moved {moved}")
+            finally:
+                await off.stop()
+                cam.offloader = None
+        await cam.disconnect()
+
+    run(go())
+
+
 def test_stream_60s_latency_and_drops():
     """Webcam stream for 60 s: frames received, dropped frames (PTS gaps), inter-arrival jitter.
 

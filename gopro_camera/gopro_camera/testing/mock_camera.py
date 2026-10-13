@@ -64,6 +64,12 @@ class MockState:
     shutter_reply_delay: float = 0.0  # encoding -> shutter-start reply
     stop_finalize_time: float = 0.2  # stop reply -> encoding 0
     hold_state_during_shutter: bool = True
+    # media transfer behaviour (offload tests)
+    video_template: bytes = b""  # content of new videos (e.g. a real MP4); empty = filler bytes
+    download_rate: float = 0.0  # bytes/s for /videos/DCIM downloads; 0 = unthrottled
+    serve_wrong_bytes: bool = False  # serve a file shorter than the media list says (corrupt copy)
+    sd_reads_while_encoding: int = 0  # download chunks pushed to the socket while encoding
+    downloads_started_while_encoding: int = 0  # download requests received while encoding (offload: 0)
     shutter_in_flight: bool = False
     finalizing: bool = False
     request_log: list[str] = field(default_factory=list)
@@ -174,7 +180,8 @@ class MockCamera:
         st.statuses[S.VIDEO_ENCODING_DURATION] = 0
         st.next_index += 1
         name = f"100GOPRO/GX01{st.next_index:04d}{ext}" if ext == ".MP4" else f"100GOPRO/GOPR{st.next_index:04d}{ext}"
-        self.add_file(name, b"\x01" * 200_000)
+        data = st.video_template if ext == ".MP4" and st.video_template else b"\x01" * 200_000
+        self.add_file(name, data)
         st.statuses[S.VIDEOS if ext == ".MP4" else S.PHOTOS] += 1
         st.last_captured = name  # type: ignore[attr-defined]
 
@@ -434,7 +441,22 @@ class MockCamera:
             path = f"{r.match_info['folder']}/{r.match_info['file']}"
             if path not in st.files:
                 raise web.HTTPNotFound()
-            return web.Response(body=st.files[path], content_type="application/octet-stream")
+            if st.statuses[S.ENCODING]:
+                st.downloads_started_while_encoding += 1
+            data = st.files[path][:-10] if st.serve_wrong_bytes else st.files[path]
+            resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream"})
+            resp.content_length = len(data)
+            await resp.prepare(r)
+            chunk = 32 * 1024
+            for i in range(0, len(data), chunk):
+                if st.statuses[S.ENCODING]:
+                    st.sd_reads_while_encoding += 1
+                part = data[i : i + chunk]
+                await resp.write(part)
+                if st.download_rate > 0:
+                    await asyncio.sleep(len(part) / st.download_rate)
+            await resp.write_eof()
+            return resp
 
         for kind in ("gpmf", "thumbnail", "screennail", "telemetry"):
 
