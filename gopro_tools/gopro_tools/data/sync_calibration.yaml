@@ -7,10 +7,10 @@ calibrations:
     fps: 29.97
     resolution: 5312x2988
     firmware: H24.01.02.04.00
-    start_offset_s: -0.037
-    uncertainty_s: 0.024
-    sd_s: 0.007
-    n: 10
+    start_offset_s: -0.042
+    uncertainty_s: 0.0225
+    sd_s: 0.0052
+    n: 9
     display_lag_s: 0.0
     settings:
       video_resolution: 5.3K
@@ -20,5 +20,6 @@ calibrations:
       hindsight: 'Off'
     measured: '2026-10-13'
     note: >-
-      Read by eye from an on-screen clock (pilot of gopro-calibrate-sync); display lag not
-      subtracted, so the true offset is likely 10-30 ms later. Uncertainty = sqrt((2 sd)^2 + 20 ms^2).
+      gopro-calibrate-sync, 10 recordings, 1 outlier (late ack) excluded; median. An earlier
+      by-eye reading of the same configuration gave -37 ms. Display lag not subtracted (true offset
+      likely 10-30 ms later). Uncertainty = sqrt((2 sd)^2 + 20 ms^2).

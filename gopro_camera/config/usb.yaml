@@ -23,7 +23,7 @@
       publish_h264: true
       max_rate: 10.0
       scale: 0.5
-      latency_offset: 1.5      # measure for your setup (README, "Stream latency")
+      latency_offset: 0.69     # HERO13/USB webcam, measured with gopro-calibrate-sync; re-measure for your setup
     camera_info_url: ""        # e.g. file:///home/robot/calib/gopro_1080p_linear.yaml
     media:
       download_dir: ~/gopro_media

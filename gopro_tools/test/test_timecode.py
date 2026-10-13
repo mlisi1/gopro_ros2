@@ -26,6 +26,14 @@ def test_encode_checksum_and_unwrap():
     assert tc.unwrap(999_990, 1_791_886_000_005) == 1_791_885_999_990
 
 
+def test_inliers_drop_a_late_ack():
+    # first frame - ack [s] of a real HERO13/USB run: recording 7 had an ack ~40 ms late
+    v = [-0.0445, -0.045, -0.042, -0.051, -0.041, -0.0438, -0.0396, -0.0813, -0.0352, -0.034]
+    keep = tc.inliers(v)
+    assert keep == [True] * 7 + [False] + [True] * 2
+    assert tc.inliers([0.0, 0.0, 0.0, 0.005]) == [True] * 4  # 10 ms floor when the spread is tiny
+
+
 def test_decode_rendered_and_warped():
     assert tc.decode(tc.render(MS)) == MS % tc.MODULO_MS
     assert tc.decode(_warp(tc.render(MS))) == MS % tc.MODULO_MS

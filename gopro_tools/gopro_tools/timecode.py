@@ -219,11 +219,20 @@ def first_frame_time(
 
 def summarize(values: Iterable[float]) -> dict[str, float]:
     v = list(values)
+    med = statistics.median(v)
     return {
         "n": len(v),
         "mean": statistics.fmean(v),
-        "median": statistics.median(v),
+        "median": med,
         "sd": statistics.stdev(v) if len(v) > 1 else 0.0,
+        "robust_sd": 1.4826 * statistics.median(abs(x - med) for x in v),  # MAD-based
         "min": min(v),
         "max": max(v),
     }
+
+
+def inliers(values: list[float], k: float = 4.0, floor: float = 0.010) -> list[bool]:
+    """Mask of values within ``max(k * robust sd, floor)`` of the median (e.g. drop a late ack)."""
+    s = summarize(values)
+    limit = max(k * s["robust_sd"], floor)
+    return [abs(x - s["median"]) <= limit for x in values]

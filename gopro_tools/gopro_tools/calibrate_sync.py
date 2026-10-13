@@ -7,7 +7,8 @@
    downloads each one and decodes the clock in its first frames.
 3. Reports first frame - camera_ack (and - command_sent) per recording, and writes the calibration
    for this model / transport / frame rate / resolution / firmware to ``--calibration-file``
-   (default ~/.ros/gopro/sync_calibration.yaml), which ``gopro-align`` reads.
+   (default ~/.ros/gopro/sync_calibration.yaml), which ``gopro-align`` reads. Per-run details go to
+   ``--out`` (default ~/gopro_media/calibration/<date>).
 4. Optionally (``--stream-latency SECONDS``) starts the webcam stream and measures receive time -
    shown time, i.e. the value for the driver's ``stream.latency_offset`` parameter.
 
@@ -71,7 +72,12 @@ async def _connect(args: argparse.Namespace) -> Any:
     from gopro_camera.camera import CameraConfig, GoProCamera
     from gopro_camera.transports import TransportConfig
 
-    tcfg = TransportConfig(transport=args.transport, serial=args.serial or None, ble_sidechannel=args.ble)
+    tcfg = TransportConfig(
+        transport=args.transport,
+        serial=args.serial or None,
+        ble_sidechannel=args.ble,
+        usb_base_url=args.usb_base_url or None,
+    )
     cam = GoProCamera(CameraConfig(transport=tcfg))
     await cam.connect()
     return cam
@@ -97,20 +103,26 @@ async def record_and_measure(cam: Any, args: argparse.Namespace, out: Path) -> l
         if not (start.success and stop.success and stop.filename):
             log.error("[%d] recording failed: %s / %s", i, start.message, stop.message)
             continue
-        ok, failed = await cam.download_media([stop.filename], out / "media")
+        # No turbo transfer: files are small, and toggling it around every download made the camera's
+        # HTTP server stop accepting connections for a few seconds (HERO13/USB).
+        ok, failed = await cam.download_media([stop.filename], out / "media", turbo=False)
         if failed or not ok:
             log.error("[%d] download of %s failed", i, stop.filename)
             continue
         mp4 = Path(ok[0])
-        ff = await asyncio.to_thread(
-            tc.first_frame_time,
-            mp4,
-            start.command_sent_ns / 1e9,
-            args.display_lag_ms / 1e3,
-            args.max_frames,
-        )
+        try:
+            ff = await asyncio.to_thread(
+                tc.first_frame_time,
+                mp4,
+                start.command_sent_ns / 1e9,
+                args.display_lag_ms / 1e3,
+                args.max_frames,
+            )
+            why = f"no readable clock in the first {args.max_frames} frames"
+        except Exception as e:  # corrupt / unsupported file
+            ff, why = None, f"cannot decode video ({type(e).__name__}: {e})"
         if ff is None:
-            msg = f"[{i}] no readable clock in the first {args.max_frames} frames of {mp4.name}"
+            msg = f"[{i}] {mp4.name}: {why}"
             if not rows:
                 raise SystemExit(msg + ": is the calibration page visible and in focus?")
             log.error("%s", msg)
@@ -123,6 +135,7 @@ async def record_and_measure(cam: Any, args: argparse.Namespace, out: Path) -> l
             "camera_ack": start.camera_ack_ns / 1e9,
             "encoding_changed": start.encoding_changed_ns / 1e9,
             "first_frame": ff.t_s,
+            "ack_minus_sent_ms": (start.camera_ack_ns - start.command_sent_ns) / 1e6,
             "first_frame_minus_ack_ms": (ff.t_s - start.camera_ack_ns / 1e9) * 1e3,
             "first_frame_minus_sent_ms": (ff.t_s - start.command_sent_ns / 1e9) * 1e3,
             "encoding_changed_minus_first_frame_ms": (start.encoding_changed_ns / 1e9 - ff.t_s) * 1e3,
@@ -131,6 +144,7 @@ async def record_and_measure(cam: Any, args: argparse.Namespace, out: Path) -> l
         }
         row["fps"], row["resolution"], row["firmware"] = video_meta(mp4)
         rows.append(row)
+        _write_csv(out / "recordings.csv", rows)  # keep partial results if the run is interrupted
         log.info(
             "[%d] %s: first frame %+.0f ms vs ack, %+.0f ms vs sent (%d frames, spread %.0f ms)",
             i,
@@ -180,6 +194,26 @@ async def measure_stream_latency(cam: Any, args: argparse.Namespace) -> dict[str
     return s
 
 
+def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+
+
+async def _wait_for_enter() -> None:
+    """Wait for Enter in a daemon thread (a default-executor thread blocked on stdin would hang Ctrl-C)."""
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[None] = loop.create_future()
+
+    def _read() -> None:
+        sys.stdin.readline()
+        loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(None))
+
+    threading.Thread(target=_read, name="wait-enter", daemon=True).start()
+    await fut
+
+
 # ------------------------------------------------------------------------------------------ main
 async def run(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser()
@@ -195,20 +229,25 @@ async def run(args: argparse.Namespace) -> int:
         if settings.get("hindsight", "Off").casefold() != "off":
             raise SystemExit("HindSight is on: the files would start before the command. Turn it off.")
         if not args.yes:
-            print(f"\nOpen http://localhost:{args.port}/ full screen and point the camera at it. Enter to start.")
-            await asyncio.to_thread(sys.stdin.readline)
+            print(f"\n>>> Open http://localhost:{args.port}/ full screen, point the camera at it, then press Enter.")
+            await _wait_for_enter()
         rows = await record_and_measure(cam, args, out) if args.n > 0 else []
         stream = await measure_stream_latency(cam, args) if args.stream_latency > 0 else None
     finally:
         await cam.disconnect()
 
     summary: dict[str, Any] = {"camera": meta, "display_lag_ms": args.display_lag_ms, "recordings": rows}
+    print("\n=== gopro-calibrate-sync summary")
     if rows:
-        with open(out / "recordings.csv", "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0]))
-            w.writeheader()
-            w.writerows(rows)
-        offs = tc.summarize(r["first_frame_minus_ack_ms"] / 1e3 for r in rows)
+        values = [r["first_frame_minus_ack_ms"] / 1e3 for r in rows]
+        keep = tc.inliers(values)
+        for r, ok in zip(rows, keep, strict=True):
+            r["outlier"] = not ok
+        outliers = [r for r in rows if r["outlier"]]
+        _write_csv(out / "recordings.csv", rows)
+        # Robust: an occasionally late ack (host/HTTP scheduling) must not shift the calibration.
+        offs = tc.summarize(v for v, ok in zip(values, keep, strict=True) if ok)
+        summary["first_frame_minus_ack_all_s"] = tc.summarize(values)
         summary["first_frame_minus_ack_s"] = offs
         summary["first_frame_minus_sent_s"] = tc.summarize(r["first_frame_minus_sent_ms"] / 1e3 for r in rows)
         fps, resolution, firmware = rows[0]["fps"], rows[0]["resolution"], rows[0]["firmware"]
@@ -216,7 +255,7 @@ async def run(args: argparse.Namespace) -> int:
         cal = sc.SyncCalibration(
             model=meta["model"],
             transport=rows[0]["transport"],
-            start_offset_s=round(offs["mean"], 4),
+            start_offset_s=round(offs["median"], 4),
             uncertainty_s=round(unc, 4),
             fps=fps,
             resolution=resolution,
@@ -228,31 +267,36 @@ async def run(args: argparse.Namespace) -> int:
             measured=datetime.date.today().isoformat(),
         )
         summary["calibration"] = cal.to_dict()
-        if offs["n"] < 3:
-            log.warning("only %d usable recording(s): calibration not saved", offs["n"])
-        elif not args.dry_run:
-            sc.save(Path(args.calibration_file), cal)
-            log.info("saved to %s: %s", args.calibration_file, cal.describe())
-        log.info(
-            "first frame - ack: mean %+.1f ms, sd %.1f ms, range [%+.0f, %+.0f] ms (n=%d)",
-            offs["mean"] * 1e3,
-            offs["sd"] * 1e3,
-            offs["min"] * 1e3,
-            offs["max"] * 1e3,
-            offs["n"],
+        sent = summary["first_frame_minus_sent_s"]
+        print(f"camera:       {meta['model']} fw {cal.firmware}, {fps:g} fps {resolution}, settings {settings}")
+        print(
+            f"first - ack:  median {offs['median'] * 1e3:+.1f} ms, mean {offs['mean'] * 1e3:+.1f} ms, "
+            f"sd {offs['sd'] * 1e3:.1f} ms, range [{offs['min'] * 1e3:+.0f}, {offs['max'] * 1e3:+.0f}] ms "
+            f"(n={offs['n']}, {len(outliers)} outlier(s) excluded)"
         )
+        for r in outliers:
+            print(
+                f"  outlier: [{r['i']}] {r['first_frame_minus_ack_ms']:+.0f} ms vs ack, "
+                f"{r['first_frame_minus_sent_ms']:+.0f} ms vs sent (ack {r['ack_minus_sent_ms']:.0f} ms after sent)"
+            )
+        print(f"first - sent: mean {sent['mean'] * 1e3:+.1f} ms, sd {sent['sd'] * 1e3:.1f} ms")
+        if offs["n"] < 3:
+            print(f"calibration NOT saved: only {offs['n']} usable recording(s)")
+        elif args.dry_run:
+            print(f"calibration (dry run, not saved): {cal.describe()}")
+        else:
+            sc.save(Path(args.calibration_file), cal)
+            print(f"calibration saved to {args.calibration_file}: {cal.describe()}")
+    elif args.n > 0:
+        print("no usable recordings")
     if stream is not None:
         summary["stream_latency_s"] = stream
-        log.info(
-            "stream latency: median %.3f s (p10 %.3f, p90 %.3f, n=%d) -> stream.latency_offset: %.2f",
-            stream["median"],
-            stream["p10"],
-            stream["p90"],
-            stream["n"],
-            stream["median"],
+        print(
+            f"stream:       latency median {stream['median']:.3f} s (p10 {stream['p10']:.3f}, p90 {stream['p90']:.3f}, "
+            f"n={stream['n']}) -> stream.latency_offset: {stream['median']:.2f}"
         )
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
-    log.info("details in %s", out)
+    print(f"details:      {out}")
     return 0 if rows or stream else 1
 
 
@@ -261,6 +305,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--transport", default="usb", help="usb | cohn | ble | wifi_ap (needs HTTP for downloads)")
     ap.add_argument("--serial", default="")
     ap.add_argument("--ble", action="store_true", help="also open the BLE side channel")
+    ap.add_argument("--usb-base-url", default="", help="camera HTTP base URL override (tests / NAT)")
     ap.add_argument("--n", type=int, default=10, help="number of recordings (0 = only stream latency)")
     ap.add_argument("--duration", type=float, default=2.0, help="seconds per recording")
     ap.add_argument("--pause", type=float, default=2.0, help="seconds between recordings")
@@ -271,17 +316,23 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--stream-latency", type=float, default=0.0, help="also measure webcam latency for N seconds")
     ap.add_argument("--stream-port", type=int, default=8554)
     ap.add_argument("--calibration-file", default=str(sc.USER_FILE))
-    ap.add_argument("--out", default=f"~/gopro_calibration/{datetime.datetime.now():%Y%m%d_%H%M%S}")
+    ap.add_argument("--out", default=f"~/gopro_media/calibration/{datetime.datetime.now():%Y%m%d_%H%M%S}")
     ap.add_argument("--keep-media", action="store_true", help="keep the downloaded MP4s")
     ap.add_argument("--no-preset", action="store_true", help="do not load the video preset group first")
     ap.add_argument("--dry-run", action="store_true", help="do not write the calibration file")
     ap.add_argument("--yes", action="store_true", help="do not wait for Enter before recording")
     args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # Our progress at INFO; the SDK logs every HTTP request at INFO, so only its warnings.
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    for name in ("gopro-calibrate-sync", "gopro_camera"):
+        logging.getLogger(name).setLevel(logging.INFO)
     server = serve_clock(args.port)
     log.info("clock page: http://localhost:%d/", args.port)
     try:
         code = asyncio.run(run(args))
+    except KeyboardInterrupt:
+        print("\ninterrupted; partial results (if any) are in", args.out)
+        code = 130
     finally:
         server.shutdown()
     raise SystemExit(code)

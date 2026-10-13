@@ -139,13 +139,13 @@ python3 gopro_camera/scripts/generate_spec_tables.py   # downloads https://gopro
 The start offset depends on the camera configuration (model, firmware, frame rate, resolution, possibly HyperSmooth) and transport, so measure it for the configuration you record missions with. `gopro_tools` ships one default (the HERO13/USB/5.3K30 measurement above); results you measure go to `~/.ros/gopro/sync_calibration.yaml` and take precedence.
 
 1. Stop the driver node. Set the camera as for a mission; **HindSight off** (it would prepend footage from before the command). Higher frame rates resolve the start more finely.
-2. Run the tool. In Docker, use the `driver` service (host network, `~/.ros/gopro` mounted so the result lands in the host's file): `docker compose -f docker/compose.yaml run --rm driver ros2 run gopro_tools gopro-calibrate-sync --out /root/gopro_media/calibration` (the `--out` keeps the per-run details in the host's `~/gopro_media`). Natively:
+2. Run the tool. In Docker, use the `driver` service (host network; `~/.ros/gopro` and `~/gopro_media` are mounted, so the calibration and the per-run details in `~/gopro_media/calibration/<date>/` land on the host): `docker compose -f docker/compose.yaml run --rm driver ros2 run gopro_tools gopro-calibrate-sync --stream-latency 20`. Natively:
    ```bash
    ros2 run gopro_tools gopro-calibrate-sync --n 10 --stream-latency 20
    ```
 3. Open `http://localhost:8765/` on a screen of the same host, full screen, and point the camera at it (the three markers large in the frame, no glare); press Enter.
 
-The page shows the host clock as three ArUco markers (seconds, milliseconds, checksum), redrawn every display refresh. The tool records `--n` short videos, decodes the clock in the first frames of each, and reports *first frame - ack* per recording, then saves mean and uncertainty (2 sd combined with `--display-lag-uncertainty-ms`, default 20 ms: the monitor shows each value slightly late; pass `--display-lag-ms` if you know your display's lag). `--stream-latency N` also measures the webcam stream latency for N seconds and prints the value for `stream.latency_offset`. Details per run go to `~/gopro_calibration/<date>/` (`recordings.csv`, `summary.json`).
+The page shows the host clock as three ArUco markers (seconds, milliseconds, checksum), redrawn every display refresh. The tool records `--n` short videos, decodes the clock in the first frames of each, and reports *first frame - ack* per recording, then saves mean and uncertainty (2 sd combined with `--display-lag-uncertainty-ms`, default 20 ms: the monitor shows each value slightly late; pass `--display-lag-ms` if you know your display's lag). `--stream-latency N` also measures the webcam stream latency for N seconds and prints the value for `stream.latency_offset`. Details per run go to `~/gopro_media/calibration/<date>/` (`recordings.csv` with outliers marked, `summary.json`). The offset is the median over recordings; an occasional late ack (> 4 robust sd from the median) is excluded and listed.
 
 ## Live stream
 
@@ -210,7 +210,7 @@ docker compose -f docker/compose.yaml run --rm test run_tests -k settings     # 
 GOPRO_CONFIG=usb.yaml docker compose -f docker/compose.yaml up driver         # real camera
 ```
 
-The `driver` service uses host networking (the USB NCM link, COHN and the UDP stream are host interfaces) and `ipc: host` so DDS shared memory works with ROS nodes on the host. BLE goes through the host's BlueZ via the mounted system D-Bus socket. COHN credentials are kept in `~/.ros/gopro` and downloads in `~/gopro_media` on the host. Parameter files are read from `docker/config/` (`GOPRO_CONFIG` picks one). Run the hardware tests against a real camera with `docker compose -f docker/compose.yaml run --rm driver run_tests --hardware -s`. Build args: `FETCH_SAMPLE` (download GoPro's public HERO8 sample MP4 for the end-to-end align test, default 1) and `WITH_WIFI_AP` (install `nmcli` for the `wifi_ap` transport, default 0).
+The `driver` service uses host networking (the USB NCM link, COHN and the UDP stream are host interfaces) and `ipc: host` so DDS shared memory works with ROS nodes on the host. BLE goes through the host's BlueZ via the mounted system D-Bus socket. COHN credentials and sync calibrations are kept in `~/.ros/gopro`, downloads and calibration runs in `~/gopro_media` on the host. Parameter files are read from `docker/config/` (`GOPRO_CONFIG` picks one). Run the hardware tests against a real camera with `docker compose -f docker/compose.yaml run --rm driver run_tests --hardware -s`. Build args: `FETCH_SAMPLE` (download GoPro's public HERO8 sample MP4 for the end-to-end align test, default 1) and `WITH_WIFI_AP` (install `nmcli` for the `wifi_ap` transport, default 0).
 
 ## Known limitations
 
