@@ -279,6 +279,50 @@ def test_link_loss_and_reconnect_keeps_recording(make_camera, mock_cam):
     assert any(e.event == camera_mod.EV_ADOPTED for e in rec.events)
 
 
+def test_stream_restarted_after_reconnect(make_camera, mock_cam):
+    """After a link loss the stream state is cleared, so the node restarts it on reconnect."""
+    cam, _ = make_camera()
+
+    async def go():
+        await cam.connect()
+        await cam.start_stream("preview", None, None, 8556, None)
+        assert cam.stream_mode == "preview"
+        mock_cam.set_offline(True)
+        for _ in range(100):
+            await asyncio.sleep(0.1)
+            if not cam.connected:
+                break
+        assert not cam.connected and cam.stream_mode == ""
+        mock_cam.set_offline(False)
+        await cam.disconnect()
+
+    run(go())
+
+
+def test_reconnect_wait_ends_when_usb_link_reappears(make_camera, monkeypatch):
+    """A HERO13 brings USB back only when idle: retry at once instead of sitting out the backoff."""
+    import time as _time
+
+    from gopro_camera.transports import usb
+
+    cam, _ = make_camera()
+    cam.cfg.transport.usb_base_url = None  # real USB mode: the interface watcher is active
+    appears_at = _time.monotonic() + 1.5
+    monkeypatch.setattr(
+        usb,
+        "detect_usb_serial_suffixes",
+        lambda _iface=None: [("enx0", "636")] if _time.monotonic() > appears_at else [],
+    )
+
+    async def go():
+        t = _time.monotonic()
+        await cam._wait_before_retry(30.0)
+        return _time.monotonic() - t
+
+    waited = run(go())
+    assert 1.4 < waited < 4.0  # not the 30 s backoff
+
+
 def test_sleep_refused_without_ble(make_camera, mock_cam):
     """Over USB alone a sleeping camera cannot be woken (its network interface disappears)."""
     cam, _ = make_camera()

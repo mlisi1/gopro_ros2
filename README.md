@@ -67,7 +67,11 @@ Select with the `transport` parameter: `usb | wifi_ap | cohn | ble | auto` (`aut
 ### BLE setup (BlueZ)
 
 - `sudo apt install bluez` and make sure `bluetoothd` runs; the user needs D-Bus access to BlueZ (normally true for desktop users; on headless robots add the user to the `bluetooth` group).
-- **Pair once**: put the camera in pairing mode (see GoPro's pairing instructions for your model) and start the driver; the SDK finds it by its advertised name `GoPro XXXX` (`ble_name`, or the last 4 digits of `serial`) and completes pairing.
+- **Pair once, through the driver** (not the desktop Bluetooth settings: the camera needs the GoPro protocol to finish pairing, and a desktop attempt only reports "setup failed"): put the camera in pairing mode (HERO13: swipe down on the rear screen → Preferences/Connections → Connect Device → GoPro Quik App) and start the driver with BLE; the SDK finds it by its advertised name `GoPro XXXX` (`ble_name`, or the last 4 digits of `serial`) and completes pairing.
+- A GoPro accepts **one BLE connection at a time** (a phone with GoPro Quik connected keeps the driver out).
+- If connections start failing after a pairing (camera shows connect/disconnect cycles), the camera and the PC disagree about the bond: `bluetoothctl remove <camera MAC>` and pair again.
+- **Known camera bug (HERO12/HERO13, also reported for HERO9):** after leaving its pairing screen the camera forgets the bond and only accepts reconnection while the pairing screen is open again (reconnects fail with `PIN or Key Missing` / `le-connection-abort-by-local`). Tracked upstream as [gopro/OpenGoPro#476](https://github.com/gopro/OpenGoPro/issues/476) (open; GoPro: "a bug on the GoPro … being investigated internally"). Seen here on HERO13 firmware H24.01.02.04.00; update the camera firmware and re-check. Until fixed, BLE needs the pairing screen for every new connection.
+- In Docker, the `driver` service runs with `security_opt: apparmor:unconfined`: Docker's default AppArmor profile blocks the D-Bus messages BlueZ needs.
 - A camera asleep still advertises: connecting over BLE wakes it. This is how the side channel recovers a sleeping camera.
 
 ### COHN provisioning walkthrough
@@ -144,6 +148,8 @@ Progress: `~/status` (`offload_mode`, `offload_pending`, `offload_failed`, `offl
 - **activate**: publish status/images; start the stream if `stream.enabled`.
 - **deactivate**: stop the stream; an ongoing recording continues unless `stop_recording_on_deactivate`.
 - **cleanup/shutdown**: release control and disconnect (`sleep_on_shutdown` optional; never while recording).
+
+**USB replug during a recording.** The camera keeps recording on its battery and the driver never stops it, but a HERO13 re-enables its USB network only once it is idle: until the recording ends (button, BLE, or SD full) the driver cannot reach it over USB (diagnostics say so). It then reconnects within ~1-2 s of the link coming back and reports the stop as `EXTERNAL_STOP` with the file name; the stream is restarted. Use `ble_sidechannel: true` on robots to keep control through such a glitch.
 
 **Sleep needs BLE to wake.** On a HERO13 over USB the camera's USB network interface disappears while it sleeps, so no request can reach it: only its button or a BLE connection wakes it. `~/sleep` and `sleep_on_shutdown` are therefore refused without a BLE link unless `allow_sleep_without_ble: true` (then wake it by hand).
 - **link loss**: diagnostics error, reconnect with exponential backoff; after reconnecting, a running recording is detected and *adopted* (ADOPTED event).

@@ -42,6 +42,10 @@ services:
     <<: *image
     network_mode: host
     ipc: host
+    # BLE: Docker's default AppArmor profile denies D-Bus messages to BlueZ ("An AppArmor policy prevents
+    # this sender from sending this message"). This service talks to hardware anyway (host network).
+    security_opt:
+      - apparmor:unconfined
     environment:
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
     # create_host_path: false - Docker would otherwise create missing host directories as root.

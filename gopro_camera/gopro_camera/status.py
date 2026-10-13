@@ -175,7 +175,19 @@ def evaluate(
     items: list[DiagItem] = []
 
     if not connected:
-        items.append(DiagItem("link", ERROR, f"disconnected ({transport})", {"transport": transport}))
+        msg = f"disconnected ({transport})"
+        if as_flag(st.get(S.ENCODING)):  # last known state before the link went down
+            msg += "; the camera was recording and keeps recording on its own"
+            if transport == "usb":
+                msg += (
+                    "; over USB it reappears only after the recording ends (stop it with the button, or use "
+                    "ble_sidechannel to keep control)"
+                )
+        items.append(
+            DiagItem(
+                "link", ERROR, msg, {"transport": transport, "last_known_encoding": str(as_flag(st.get(S.ENCODING)))}
+            )
+        )
     elif status_age > th.status_stale_s:
         items.append(DiagItem("link", WARN, f"no status for {status_age:.1f}s", {"transport": transport}))
     else:

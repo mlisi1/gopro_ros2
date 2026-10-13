@@ -397,6 +397,8 @@ class GoProCamera:
         if not self.connected:
             return
         self.connected = False
+        # The camera may come back with the stream reset (USB re-enumeration): restart it on reconnect.
+        self.stream_mode = ""
         logger.error("link lost (%s): %s", self.context(), reason)
         self.listener.on_link(self, False, reason)
         if self.cfg.reconnect and not self.sleeping and (self._reconnect_task is None or self._reconnect_task.done()):
@@ -417,8 +419,32 @@ class GoProCamera:
                 raise
             except Exception as e:
                 logger.warning("reconnect attempt %d failed: %s; retrying in %.0fs", attempt, e, delay)
-            await asyncio.sleep(delay)
+            await self._wait_before_retry(delay)
             delay = min(delay * 2, self.cfg.reconnect_backoff_max)
+
+    async def _wait_before_retry(self, delay: float) -> None:
+        """Back off, but retry at once when the camera's USB network link (re)appears.
+
+        A HERO13 brings its USB network back only once it is idle (e.g. after a replug during a
+        recording it stays away until the recording ends), so the moment is unpredictable; waiting out
+        a 30 s backoff after that would leave the camera uncontrolled for no reason.
+        """
+        tcfg = self.cfg.transport
+        watch_usb = (tcfg.transport == "usb" or (tcfg.transport == "auto" and "usb" in self.cfg.auto_order)) and not (
+            tcfg.usb_base_url
+        )
+        if not watch_usb:
+            await asyncio.sleep(delay)
+            return
+        from gopro_camera.transports.usb import detect_usb_serial_suffixes
+
+        had_link = bool(await asyncio.to_thread(detect_usb_serial_suffixes, tcfg.usb_interface))
+        end = time.monotonic() + delay
+        while time.monotonic() < end:
+            await asyncio.sleep(min(1.0, max(end - time.monotonic(), 0.0)))
+            if not had_link and await asyncio.to_thread(detect_usb_serial_suffixes, tcfg.usb_interface):
+                logger.info("USB network link to the camera is back; reconnecting now")
+                return
 
     async def ensure_connected(self) -> None:
         if self.connected and self.bundle is not None:

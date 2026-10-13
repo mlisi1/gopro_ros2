@@ -52,3 +52,30 @@ def test_diagnostics_levels():
     assert lv["battery"] == OK
     lv = _levels({}, stream_active=True, stream_frame_age=10.0)
     assert lv["stream"] == ERROR
+
+
+def test_link_lost_while_recording_explains_usb_behaviour():
+    th = DiagThresholds()
+    st = {S.ENCODING: 1}
+    link = next(
+        i
+        for i in evaluate(
+            st, connected=False, status_age=9.0, transport="usb", stream_active=False, stream_frame_age=None, th=th
+        )
+        if i.name == "link"
+    )
+    assert link.level == ERROR and "keeps recording" in link.message and "ble_sidechannel" in link.message
+    idle = next(
+        i
+        for i in evaluate(
+            {S.ENCODING: 0},
+            connected=False,
+            status_age=9.0,
+            transport="usb",
+            stream_active=False,
+            stream_frame_age=None,
+            th=th,
+        )
+        if i.name == "link"
+    )
+    assert "keeps recording" not in idle.message
