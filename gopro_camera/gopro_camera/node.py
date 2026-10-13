@@ -17,6 +17,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -1237,8 +1238,29 @@ class GoProNode(LifecycleNode):
         return result
 
 
+def _install_shutdown_signals() -> None:
+    """SIGINT and SIGTERM -> one KeyboardInterrupt in the main thread, i.e. a clean shutdown.
+
+    Installed explicitly: a process started as a background job of a non-interactive shell inherits
+    SIGINT *ignored*, and Python then never raises KeyboardInterrupt (the node could not be stopped
+    with Ctrl-C/SIGINT). SIGTERM (systemd, kill, docker stop) would otherwise end the process without
+    releasing the camera. Further signals during the cleanup are ignored so it is not cut short.
+    """
+    fired = [False]
+
+    def handler(signum: int, _frame: Any) -> None:
+        if fired[0]:
+            return
+        fired[0] = True
+        raise KeyboardInterrupt(f"signal {signal.Signals(signum).name}")
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, handler)
+
+
 def main(args: list[str] | None = None) -> None:
-    # Handle SIGINT ourselves so the context stays valid while the camera is released on shutdown.
+    # Handle signals ourselves so the context stays valid while the camera is released on shutdown.
+    _install_shutdown_signals()
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = GoProNode()
     executor = MultiThreadedExecutor(num_threads=8)
