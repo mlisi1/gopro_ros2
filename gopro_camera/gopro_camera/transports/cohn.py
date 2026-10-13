@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from gopro_camera.errors import NotConnected
+from gopro_camera.transports import sdk_compat
 from gopro_camera.transports.base import TransportConfig
 from gopro_camera.transports.ble import BleChannel, build_wireless_sdk
 from gopro_camera.transports.bundle import TransportBundle
@@ -33,7 +34,7 @@ async def open_cohn(cfg: TransportConfig) -> TransportBundle:
         ble_hint = "" if cfg.ble_sidechannel else " (enable ble_sidechannel or provision from another transport)"
         await sdk.close()
         raise NotConnected(f"COHN: no stored credentials for camera {cfg.ble_target}; call ~/provision_cohn{ble_hint}")
-    sdk._is_cohn_configured = True  # SDK only sets this inside open() when BLE is up
+    sdk_compat.mark_cohn_configured(sdk)  # SDK only sets this inside open() when BLE is up
     http = HttpChannel("cohn", sdk, cfg.command_timeout)
     version = await http.get_version()
     http.mark_connected(True)

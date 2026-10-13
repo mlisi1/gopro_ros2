@@ -13,8 +13,9 @@ Lanes (serialisation):
 - ``media`` : downloads, one at a time, independent of commands so status keeps flowing.
 
 Endpoints that SDK 0.22 does not wrap (hilight moment, sleep, raw camera state including setting IDs
-newer than the SDK) are sent as ``HttpMessage`` objects through the SDK's own ``_get_json`` so that
-session handling, COHN auth headers and certificates stay in the SDK. Endpoint paths are taken from
+newer than the SDK) are sent as ``HttpMessage`` objects through the SDK's own ``_get_json`` (via
+:mod:`gopro_camera.transports.sdk_compat`) so that session handling, COHN auth headers and
+certificates stay in the SDK. Endpoint paths are taken from
 the official OpenAPI spec (https://gopro.github.io/OpenGoPro/http).
 """
 
@@ -35,6 +36,7 @@ from gopro_camera.errors import (
     NotConnected,
     TransportError,
 )
+from gopro_camera.transports import sdk_compat
 from gopro_camera.transports.base import CameraSnapshot, Channel
 
 logger = logging.getLogger(__name__)
@@ -167,7 +169,9 @@ class HttpChannel(Channel):
 
         args = {k: v for k, v in (args or {}).items() if v is not None}
         msg = HttpMessage(endpoint, None, arguments=list(args) or None)
-        return await self._run(lambda: self.sdk._get_json(msg, **args), what, lane=lane, timeout=timeout, check=check)
+        return await self._run(
+            lambda: sdk_compat.get_json(self.sdk, msg, **args), what, lane=lane, timeout=timeout, check=check
+        )
 
     # ------------------------------------------------------------------ connection
     async def get_version(self) -> str:
@@ -373,13 +377,7 @@ class HttpChannel(Channel):
 
         local.parent.mkdir(parents=True, exist_ok=True)
         tmp = local.with_suffix(local.suffix + ".part")
-        msg = HttpMessage("videos/DCIM/" + path, None)
-        handle_cohn = getattr(self.sdk, "_handle_cohn", None)
-        if handle_cohn is not None:
-            msg = handle_cohn(msg)
-        url = self.sdk._base_url + msg.build_url()
-        req_args = self.sdk._build_http_request_args(msg)
-        session = self.sdk._requests_session
+        url, req_args, session = sdk_compat.download_request(self.sdk, HttpMessage("videos/DCIM/" + path, None))
         stop = threading.Event()
 
         def _work() -> None:

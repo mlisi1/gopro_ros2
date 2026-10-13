@@ -217,7 +217,7 @@ The `driver` service uses host networking (the USB NCM link, COHN and the UDP st
 
 - **Not tested on real hardware yet**: transports were exercised against the fake HTTP camera; BLE, Wi-Fi AP and COHN paths rely on the SDK and need the hardware tests.
 - The SDK's HTTP layer is blocking (`requests`); the driver runs it in worker threads. When the camera is unreachable, the SDK retries for up to ~10 s per request, so link-loss detection takes about `reconnect.link_loss_threshold × status.timeout`.
-- `open_gopro` 0.22 does not wrap every endpoint of the current spec (e.g. hilight-while-recording and sleep over HTTP, settings newer than the SDK); the driver sends those through the SDK's HTTP transport. Settings unknown to the SDK cannot be set over BLE.
+- `open_gopro` 0.22 does not wrap every endpoint of the current spec (e.g. hilight-while-recording and sleep over HTTP, settings newer than the SDK); the driver sends those through the SDK's HTTP transport. Settings unknown to the SDK cannot be set over BLE. All uses of SDK internals live in `gopro_camera/transports/sdk_compat.py` (each with its reason) and are checked, with the public SDK API the driver calls, when a transport opens: an SDK upgrade that moves something fails with one message naming what is missing (`test_sdk_compat.py` checks the same in CI).
 - HTTP has no per-setting capability query; runtime option validation uses BLE capabilities when BLE is connected, otherwise the spec's per-model table plus the camera's 403 answers.
 - Webcam and recording are mutually exclusive; preview/webcam start is refused while recording.
 - Camera media timestamps are local wall-clock time without zone (`media.camera_clock_is_local`).

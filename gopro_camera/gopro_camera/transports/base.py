@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gopro_camera.errors import NotSupported
+
 TRANSPORTS = ("usb", "wifi_ap", "cohn", "ble")
 
 
@@ -58,6 +60,11 @@ class CameraSnapshot:
 
 
 class Channel(ABC):
+    """Common command interface. GoProCamera routes commands with ``fn(channel)`` over whichever
+    channel is connected, so a command only one transport supports is declared here and raises
+    NotSupported on the others (it is then retried on the next channel, never an AttributeError).
+    """
+
     kind: str  # "http" | "ble"
 
     def __init__(self, name: str) -> None:
@@ -66,6 +73,9 @@ class Channel(ABC):
     @property
     @abstractmethod
     def is_connected(self) -> bool: ...
+
+    async def power_down(self) -> None:
+        raise NotSupported(f"power down is not available over {self.kind}")
 
 
 def ensure_private_file(path: str | os.PathLike[str]) -> Path:

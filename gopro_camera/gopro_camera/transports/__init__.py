@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from gopro_camera.errors import GoProError, NotConnected
+from gopro_camera.transports import sdk_compat
 from gopro_camera.transports.base import TRANSPORTS, CameraSnapshot, TransportConfig
 from gopro_camera.transports.ble import BleChannel, build_wireless_sdk
 from gopro_camera.transports.bundle import TransportBundle
@@ -58,6 +59,10 @@ async def _open_one(cfg: TransportConfig, transport: str) -> TransportBundle:
 
 async def open_transport(cfg: TransportConfig, auto_order: list[str] | None = None) -> TransportBundle:
     """Open the configured transport (``auto`` tries ``auto_order``), plus the BLE side channel."""
+    # Fail with one clear message if the installed SDK lacks anything the driver uses (not per transport).
+    sdk_compat.check_sdk()
+    if warning := sdk_compat.version_warning():
+        logger.warning("%s", warning)
     order = auto_order or ["usb", "cohn", "ble"]
     candidates = order if cfg.transport == "auto" else [cfg.transport]
     errors: list[str] = []

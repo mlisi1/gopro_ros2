@@ -447,7 +447,7 @@ class GoProCamera:
                 result = await fn(ch)
                 self.last_command_transport = self._label(ch)
                 return result, self._label(ch)
-            except (AttributeError, NotSupported) as e:
+            except NotSupported as e:  # an AttributeError here is a driver bug and must surface as one
                 last_err = NotSupported(f"{what} not available over {self._label(ch)}: {e}", self.context())
             except TransportError as e:
                 last_err = e

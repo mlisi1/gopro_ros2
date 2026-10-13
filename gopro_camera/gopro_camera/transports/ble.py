@@ -28,6 +28,7 @@ from gopro_camera.errors import (
     NotSupported,
     TransportError,
 )
+from gopro_camera.transports import sdk_compat
 from gopro_camera.transports.base import CameraSnapshot, Channel, TransportConfig, ensure_private_file
 
 logger = logging.getLogger(__name__)
@@ -268,7 +269,9 @@ class BleChannel(Channel):
             from open_gopro.api.builders import BleSettingFacade
 
             self._setting_facades = {
-                int(v._identifier): v for v in vars(self.sdk.ble_setting).values() if isinstance(v, BleSettingFacade)
+                sdk_compat.setting_facade_id(v): v
+                for v in vars(self.sdk.ble_setting).values()
+                if isinstance(v, BleSettingFacade)
             }
         return self._setting_facades
 

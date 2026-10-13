@@ -17,10 +17,9 @@ import json
 import logging
 import re
 import subprocess
-from typing import Any
-from urllib.parse import urlparse
 
 from gopro_camera.errors import NotConnected, NotSupported
+from gopro_camera.transports import sdk_compat
 from gopro_camera.transports.base import TransportConfig
 from gopro_camera.transports.bundle import TransportBundle
 from gopro_camera.transports.http import HttpChannel
@@ -50,23 +49,6 @@ def detect_usb_serial_suffixes(interface: str | None = None) -> list[tuple[str, 
     return found
 
 
-def _make_wired(serial: str, base_url: str | None) -> Any:
-    from open_gopro import WiredGoPro
-
-    class _WiredGoPro(WiredGoPro):
-        """WiredGoPro with an optional base URL override (tests, NAT/port forwarding)."""
-
-        @property
-        def _base_url(self) -> str:
-            return base_url if base_url else super()._base_url
-
-        @property
-        def ip_address(self) -> str:
-            return (urlparse(base_url).hostname or "") if base_url else super().ip_address
-
-    return _WiredGoPro(serial, maintain_state=False)
-
-
 async def resolve_serial(cfg: TransportConfig) -> str:
     if cfg.serial:
         return cfg.serial
@@ -79,10 +61,9 @@ async def resolve_serial(cfg: TransportConfig) -> str:
     if len(candidates) > 1:
         raise NotConnected(f"USB: several GoPro NCM links {candidates}; set 'serial' or 'usb_interface' to choose one")
     import open_gopro.network.wifi.mdns_scanner as mdns
-    from open_gopro import WiredGoPro
 
     try:
-        response = await mdns.find_first_ip_addr(WiredGoPro._MDNS_SERVICE_NAME, int(cfg.connect_timeout))
+        response = await mdns.find_first_ip_addr(sdk_compat.mdns_service_name(), int(cfg.connect_timeout))
     except Exception as e:
         raise NotConnected(f"USB: no GoPro found (no NCM interface address, mDNS: {e!r})") from e
     return str(response.name.split(".")[0])
@@ -90,7 +71,7 @@ async def resolve_serial(cfg: TransportConfig) -> str:
 
 async def open_usb(cfg: TransportConfig) -> TransportBundle:
     serial = await resolve_serial(cfg)
-    sdk = _make_wired(serial, cfg.usb_base_url)
+    sdk = sdk_compat.make_wired(serial, cfg.usb_base_url)
     http = HttpChannel("usb", sdk, cfg.command_timeout)
     # Same steps as WiredGoPro.open() minus the blocking wait for "not encoding".
     await http.enable_wired_usb_control()
@@ -98,7 +79,7 @@ async def open_usb(cfg: TransportConfig) -> TransportBundle:
     version = await http.get_version()
     if version != SUPPORTED_API_VERSION:
         raise NotSupported(f"camera reports Open GoPro API {version}; this driver supports {SUPPORTED_API_VERSION}")
-    sdk._open = True  # bypass SDK open(), see module docstring
+    sdk_compat.mark_open(sdk)  # bypass SDK open(), see module docstring
     http.mark_connected(True)
-    logger.info("USB: connected to %s (Open GoPro %s)", sdk._base_url, version)
+    logger.info("USB: connected to %s (Open GoPro %s)", sdk_compat.base_url(sdk), version)
     return TransportBundle(name="usb", http=http, api_version=version, sdk_objects=[sdk])
