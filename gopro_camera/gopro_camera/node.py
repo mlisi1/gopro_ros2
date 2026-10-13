@@ -15,6 +15,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import logging
+import os
+import sys
+import threading
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -1159,6 +1163,25 @@ def main(args: list[str] | None = None) -> None:
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        _exit_without_finalizing_stuck_threads()
+
+
+def _exit_without_finalizing_stuck_threads() -> None:
+    """Skip interpreter finalization while SDK request threads are still alive.
+
+    A request to an unreachable camera outlives its timeout: the SDK keeps retrying in its worker
+    thread for up to ~35 s. Finalizing the interpreter while such a daemon thread runs native code
+    (requests / its event loop) occasionally segfaults (seen as exit -11 after a clean shutdown).
+    Everything that matters is done by now (camera released, node destroyed, rclpy shut down), so
+    flush and leave immediately.
+    """
+    others = [t for t in threading.enumerate() if t is not threading.main_thread() and t.daemon and t.is_alive()]
+    if not others:
+        return
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":

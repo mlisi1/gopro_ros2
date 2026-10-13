@@ -69,6 +69,9 @@ def _in_daemon_thread(func: Callable[[], Any], name: str = "gopro-http") -> asyn
         except RuntimeError:  # loop already closed (shutdown)
             pass
 
+    # A request abandoned after its timeout still completes later; mark its result as retrieved so
+    # asyncio does not log "Future exception was never retrieved".
+    fut.add_done_callback(lambda f: f.cancelled() or f.exception())
     threading.Thread(target=_target, name=name, daemon=True).start()
     return fut
 
