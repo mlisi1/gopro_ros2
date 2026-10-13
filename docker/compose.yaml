@@ -13,6 +13,10 @@ x-image: &image
       ROS_DISTRO: jazzy
       FETCH_SAMPLE: "1"
       WITH_WIFI_AP: "0"
+      # Container user = host user, so bind-mounted files are not root-owned (bash does not export
+      # UID, hence HOST_UID): HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ... build
+      USER_UID: "${HOST_UID:-1000}"
+      USER_GID: "${HOST_GID:-1000}"
 
 services:
   # Isolated: own network namespace, so DDS and the fake camera never touch the host.
@@ -40,10 +44,20 @@ services:
     ipc: host
     environment:
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+    # create_host_path: false - Docker would otherwise create missing host directories as root.
+    # Create them once: mkdir -p ~/.ros/gopro ~/gopro_media
     volumes:
       - /var/run/dbus:/var/run/dbus            # BlueZ (BLE) and NetworkManager (wifi_ap)
-      - ${HOME}/.ros/gopro:/root/.ros/gopro     # COHN credentials (kept 0600)
-      - ${HOME}/gopro_media:/root/gopro_media   # media downloads
+      - type: bind                             # COHN credentials (0600), sync calibration
+        source: ${HOME}/.ros/gopro
+        target: /home/gopro/.ros/gopro
+        bind:
+          create_host_path: false
+      - type: bind                             # media downloads, calibration runs
+        source: ${HOME}/gopro_media
+        target: /home/gopro/gopro_media
+        bind:
+          create_host_path: false
       - ./config:/config:ro                     # your parameter files
     command:
       - ros2

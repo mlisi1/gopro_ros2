@@ -203,14 +203,15 @@ The fake camera (`gopro_camera/testing/mock_camera.py`, aiohttp) implements the 
 `docker/` has an image (ROS 2 Jazzy, rosdep deps, venv with the pip-only deps, workspace built) and a compose file with three services. Run from the repository root:
 
 ```bash
-docker compose -f docker/compose.yaml build
+mkdir -p ~/.ros/gopro ~/gopro_media                        # once: mounted by the driver service (see below)
+docker compose -f docker/compose.yaml build                # uid/gid other than 1000: HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ... build
 docker compose -f docker/compose.yaml run --rm test        # ruff + full test suite, no hardware, isolated network
 docker compose -f docker/compose.yaml run --rm dev         # shell; source bind-mounted, `run_tests` rebuilds first
 docker compose -f docker/compose.yaml run --rm test run_tests -k settings     # extra args go to pytest
 GOPRO_CONFIG=usb.yaml docker compose -f docker/compose.yaml up driver         # real camera
 ```
 
-The `driver` service uses host networking (the USB NCM link, COHN and the UDP stream are host interfaces) and `ipc: host` so DDS shared memory works with ROS nodes on the host. BLE goes through the host's BlueZ via the mounted system D-Bus socket. COHN credentials and sync calibrations are kept in `~/.ros/gopro`, downloads and calibration runs in `~/gopro_media` on the host. Parameter files are read from `docker/config/` (`GOPRO_CONFIG` picks one). Run the hardware tests against a real camera with `docker compose -f docker/compose.yaml run --rm driver run_tests --hardware -s`. Build args: `FETCH_SAMPLE` (download GoPro's public HERO8 sample MP4 for the end-to-end align test, default 1) and `WITH_WIFI_AP` (install `nmcli` for the `wifi_ap` transport, default 0).
+The `driver` service uses host networking (the USB NCM link, COHN and the UDP stream are host interfaces) and `ipc: host` so DDS shared memory works with ROS nodes on the host. BLE goes through the host's BlueZ via the mounted system D-Bus socket. COHN credentials and sync calibrations are kept in `~/.ros/gopro`, downloads and calibration runs in `~/gopro_media` on the host. Containers run as an unprivileged user with your uid/gid (build args `USER_UID`/`USER_GID`, from `HOST_UID`/`HOST_GID`, default 1000), so nothing they write is root-owned; the two host directories must exist (Docker would create missing ones as root, so the compose file refuses instead). Parameter files are read from `docker/config/` (`GOPRO_CONFIG` picks one). Run the hardware tests against a real camera with `docker compose -f docker/compose.yaml run --rm driver run_tests --hardware -s`. Build args: `FETCH_SAMPLE` (download GoPro's public HERO8 sample MP4 for the end-to-end align test, default 1) and `WITH_WIFI_AP` (install `nmcli` for the `wifi_ap` transport, default 0).
 
 ## Known limitations
 
