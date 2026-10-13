@@ -6,6 +6,21 @@ It records high-quality footage to the SD card while ROS gets control, typed sta
 
 > **Disclaimer.** This project is not affiliated with, endorsed by or sponsored by GoPro, Inc. "GoPro", "HERO" and "Open GoPro" are trademarks of GoPro, Inc. The driver uses the public Open GoPro API and the `open_gopro` SDK as a declared dependency and ships no GoPro source code.
 
+## Hardware status
+
+Tested on a **HERO13 Black, firmware H24.01.02.04.00** (2026-10). Other models and transports are implemented against the spec/SDK but not yet verified on hardware.
+
+| Area | Status |
+|---|---|
+| USB: connect, settings, presets, record/hilight/photo, status, date/time | ✅ verified |
+| Sync anchors + start calibration (`gopro-calibrate-sync`, `gopro-align`) | ✅ verified (first frame ≈ ack − 42 ms, sd ~5 ms) |
+| Preview stream alongside SD recording (USB) / webcam stream | ✅ verified |
+| Media list/download/delete, offload copy/move | ✅ verified |
+| Driver crash mid-recording → recording adopted on restart; USB unplug mid-recording | ✅ verified |
+| BLE: pairing, control, push status, Wi-Fi AP on/off, COHN status, side channel with USB unplugged | ✅ verified, with the caveats in *Known limitations* |
+| BLE reconnection / wake from sleep over BLE | ⏸ blocked by a camera firmware bug ([gopro/OpenGoPro#476](https://github.com/gopro/OpenGoPro/issues/476)) |
+| COHN provisioning, Wi-Fi AP transport, RTMP livestream, multi-camera, Jetson (arm64), HERO12/11/10, MAX 2 | ⬜ not yet tested on hardware |
+
 ## Packages
 
 | Package | Type | Contents |
@@ -52,7 +67,7 @@ Select with the `transport` parameter: `usb | wifi_ap | cohn | ble | auto` (`aut
 | `cohn` | HTTPS + basic auth | HTTP poll (or BLE push) | yes | webcam (per model) | yes | camera joins the robot network; provision once |
 | `ble` | BLE | BLE push | yes | no | no | low bandwidth; ideal side channel |
 
-**Hybrid mode** (`ble_sidechannel: true`): a BLE link next to USB/COHN for push status, wake-from-sleep, Wi-Fi AP control, COHN provisioning and RTMP livestream. HTTP does the heavy work; every command reports the transport that executed it (`RecordingEvent.transport`). If HTTP fails with a transport error, commands fall back to BLE where possible.
+**Hybrid mode** (`ble_sidechannel: true`): a BLE link next to USB/COHN for push status, control while USB is gone, wake-from-sleep (blocked on HERO13 by the camera bond bug, see *BLE setup*), Wi-Fi AP control, COHN provisioning and RTMP livestream. HTTP does the heavy work; every command reports the transport that executed it (`RecordingEvent.transport`). If HTTP fails with a transport error, commands fall back to BLE where possible.
 
 ### USB setup
 
@@ -231,7 +246,7 @@ python3 -m pytest gopro_camera/test gopro_tools/test           # unit + mock-cam
 GOPRO_SAMPLE_MP4=hero8.mp4 python3 -m pytest gopro_tools/test  # + end-to-end align on a real GoPro file
 GOPRO_TRANSPORT=usb python3 -m pytest gopro_camera/test/test_hardware.py --hardware -s   # real camera
 ```
-The fake camera (`gopro_camera/testing/mock_camera.py`, aiohttp) implements the HTTP endpoints the driver uses with realistic state transitions (busy → encoding → idle, rejections while encoding, webcam state machine, sleep, going offline). `test_launch_services.py` brings the node up against it and calls every service and action. Hardware tests cover connect, settings round-trip, 10 s recording with hilight + download, 60 s stream and a soak test that records to SD for `GOPRO_SOAK_S` seconds (opt-in: skipped unless the variable is set).
+The fake camera (`gopro_camera/testing/mock_camera.py`, aiohttp) implements the HTTP endpoints the driver uses with realistic state transitions (busy → encoding → idle, rejections while encoding, webcam state machine, sleep, going offline). `test_launch_services.py` brings the node up against it and calls every service and action. Hardware tests (`--hardware`; env `GOPRO_TRANSPORT`, `GOPRO_SERIAL`, `GOPRO_BLE_SIDE=1`) cover connect, settings round-trip, 10 s recording with hilight + download, offload copy-then-move (deletes only the clip it recorded), 60 s stream and a soak test that records to SD for `GOPRO_SOAK_S` seconds (opt-in: skipped unless the variable is set). They record to the SD card; run them through the Docker `driver` service after rebuilding the image (`docker compose -f docker/compose.yaml build`), since that service runs the code baked into the image. Add `-o log_cli=true --log-cli-level=INFO` to see the measurements (anchor timings, frame rate, drops).
 
 ### Docker
 
@@ -246,11 +261,11 @@ docker compose -f docker/compose.yaml run --rm test run_tests -k settings     # 
 GOPRO_CONFIG=usb.yaml docker compose -f docker/compose.yaml up driver         # real camera
 ```
 
-The `driver` service uses host networking (the USB NCM link, COHN and the UDP stream are host interfaces) and `ipc: host` so DDS shared memory works with ROS nodes on the host. BLE goes through the host's BlueZ via the mounted system D-Bus socket. COHN credentials and sync calibrations are kept in `~/.ros/gopro`, downloads and calibration runs in `~/gopro_media` on the host. Containers run as an unprivileged user with your uid/gid (build args `USER_UID`/`USER_GID`, from `HOST_UID`/`HOST_GID`, default 1000), so nothing they write is root-owned; the two host directories must exist (Docker would create missing ones as root, so the compose file refuses instead). Parameter files are read from `docker/config/` (`GOPRO_CONFIG` picks one). Run the hardware tests against a real camera with `docker compose -f docker/compose.yaml run --rm driver run_tests --hardware -s`. Build args: `FETCH_SAMPLE` (download GoPro's public HERO8 sample MP4 for the end-to-end align test, default 1) and `WITH_WIFI_AP` (install `nmcli` for the `wifi_ap` transport, default 0).
+The `driver` service uses host networking (the USB NCM link, COHN and the UDP stream are host interfaces) and `ipc: host` so DDS shared memory works with ROS nodes on the host. BLE goes through the host's BlueZ via the mounted system D-Bus socket (the service runs with `security_opt: apparmor:unconfined`, because Docker's default AppArmor profile blocks those D-Bus messages). COHN credentials and sync calibrations are kept in `~/.ros/gopro`, downloads and calibration runs in `~/gopro_media` on the host. Containers run as an unprivileged user with your uid/gid (build args `USER_UID`/`USER_GID`, from `HOST_UID`/`HOST_GID`, default 1000), so nothing they write is root-owned; the two host directories must exist (Docker would create missing ones as root, so the compose file refuses instead). Parameter files are read from `docker/config/` (`GOPRO_CONFIG` picks one). Run the hardware tests against a real camera with `docker compose -f docker/compose.yaml run --rm driver run_tests --hardware -s`. Build args: `FETCH_SAMPLE` (download GoPro's public HERO8 sample MP4 for the end-to-end align test, default 1) and `WITH_WIFI_AP` (install `nmcli` for the `wifi_ap` transport, default 0).
 
 ## Known limitations
 
-- **Not tested on real hardware yet**: transports were exercised against the fake HTTP camera; BLE, Wi-Fi AP and COHN paths rely on the SDK and need the hardware tests.
+- Hardware coverage so far: see *Hardware status* (HERO13 only; Wi-Fi AP, COHN provisioning, livestream, multi-camera and other models still need hardware tests).
 - The SDK's HTTP layer is blocking (`requests`); the driver runs it in worker threads. When the camera is unreachable, the SDK retries for up to ~10 s per request, so link-loss detection takes about `reconnect.link_loss_threshold × status.timeout`.
 - `open_gopro` 0.22 does not wrap every endpoint of the current spec (e.g. hilight-while-recording and sleep over HTTP, settings newer than the SDK); the driver sends those through the SDK's HTTP transport. Settings unknown to the SDK cannot be set over BLE. All uses of SDK internals live in `gopro_camera/transports/sdk_compat.py` (each with its reason) and are checked, with the public SDK API the driver calls, when a transport opens: an SDK upgrade that moves something fails with one message naming what is missing (`test_sdk_compat.py` checks the same in CI).
 - HTTP has no per-setting capability query; runtime option validation uses BLE capabilities when BLE is connected, otherwise the spec's per-model table plus the camera's 403 answers.
