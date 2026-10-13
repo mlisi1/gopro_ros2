@@ -38,6 +38,14 @@ async def open_ble_channel(cfg: TransportConfig, name: str = "ble") -> tuple[Ble
     return BleChannel(name, sdk, cfg.command_timeout), sdk
 
 
+async def _close_ble(ble: BleChannel, sdk: object) -> None:
+    await ble.close()
+    try:
+        await sdk.close()  # type: ignore[attr-defined]
+    except Exception as e:  # closing must never raise
+        logger.warning("error while closing BLE: %r", e)
+
+
 async def _open_one(cfg: TransportConfig, transport: str) -> TransportBundle:
     if transport == "usb":
         from gopro_camera.transports.usb import open_usb
@@ -67,6 +75,17 @@ async def open_transport(cfg: TransportConfig, auto_order: list[str] | None = No
     candidates = order if cfg.transport == "auto" else [cfg.transport]
     errors: list[str] = []
     bundle: TransportBundle | None = None
+    # BLE side channel *before* USB: enabling wired USB control locks the camera UI ("USB CONNECTED"),
+    # which also closes its pairing screen, and with the HERO12/13 bond bug (gopro/OpenGoPro#476) a BLE
+    # connection may only succeed while that screen is open.
+    pre_ble: tuple[BleChannel, object] | None = None
+    tried_ble = False
+    if cfg.ble_sidechannel and "usb" in candidates:
+        tried_ble = True
+        try:
+            pre_ble = await open_ble_channel(cfg, "ble")
+        except GoProError as e:
+            logger.warning("BLE side channel unavailable (retried in the background): %s", e)
     for t in candidates:
         try:
             bundle = await _open_one(cfg, t)
@@ -74,10 +93,24 @@ async def open_transport(cfg: TransportConfig, auto_order: list[str] | None = No
         except GoProError as e:
             errors.append(f"{t}: {e}")
             logger.info("transport %s unavailable: %s", t, e)
+    if bundle is None and pre_ble is not None and cfg.transport == "usb":
+        # The cable is not there (yet): run on BLE; GoProCamera attaches USB when it appears. Needed while
+        # the bond bug forces pairing with USB unplugged (the USB connection locks the camera UI).
+        logger.warning("USB not available yet; running on the BLE side channel until the cable is connected")
+        ble, sdk = pre_ble
+        return TransportBundle(name="usb", ble=ble, api_version=await ble.get_version(), sdk_objects=[sdk])
     if bundle is None:
+        if pre_ble is not None:
+            await _close_ble(*pre_ble)
         raise NotConnected("no transport could be opened: " + "; ".join(errors))
+    if pre_ble is not None:
+        if bundle.name == "usb" and bundle.ble is None:
+            bundle.ble = pre_ble[0]
+            bundle.sdk_objects.append(pre_ble[1])
+        else:  # another transport was chosen (auto) that brings its own BLE, or none is wanted
+            await _close_ble(*pre_ble)
     # USB has no BLE of its own; open a separate BLE link as side channel when requested.
-    if cfg.ble_sidechannel and bundle.ble is None and bundle.name == "usb":
+    elif cfg.ble_sidechannel and not tried_ble and bundle.ble is None and bundle.name == "usb":
         try:
             ble, sdk = await open_ble_channel(cfg, "ble")
             bundle.ble = ble

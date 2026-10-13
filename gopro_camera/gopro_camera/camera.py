@@ -204,6 +204,9 @@ class GoProCamera:
         self._connect_lock: asyncio.Lock | None = None
         self.last_command_transport = ""
         self._next_sidechannel_try = 0.0
+        self._sidechannel_task: asyncio.Task[None] | None = None
+        self._usb_attach_task: asyncio.Task[None] | None = None
+        self._next_usb_try = 0.0
         self._side_tasks: set[asyncio.Task[Any]] = set()
         self.offloader: Any = None  # gopro_camera.offload.Offloader when media.offload is used
 
@@ -388,9 +391,15 @@ class GoProCamera:
             self.listener.on_link(self, False, "disconnected by driver")
 
     async def _stop_tasks(self) -> None:
-        for t in self._tasks:
+        tasks = list(self._tasks)
+        for attr in ("_sidechannel_task", "_usb_attach_task"):  # must not outlive the connection
+            t = getattr(self, attr)
+            if t is not None:
+                tasks.append(t)
+                setattr(self, attr, None)
+        for t in tasks:
             t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
 
     async def _on_link_lost(self, reason: str) -> None:
@@ -589,7 +598,11 @@ class GoProCamera:
                     if self._ble_push_active:
                         logger.warning("BLE side channel lost; falling back to HTTP polling")
                         self._ble_push_active = False
-                    await self._maybe_reopen_sidechannel()
+                    self._kick_sidechannel_reopen()
+                elif self.ble is None and self.cfg.transport.ble_sidechannel and self.http is not None:
+                    self._kick_sidechannel_reopen()  # not available at connect time: keep trying
+                if self.http is None and self.bundle is not None and self.bundle.name == "usb":
+                    self._kick_usb_attach()  # started on BLE before the cable was connected
                 await asyncio.wait_for(self.refresh_state(self.cfg.status_timeout), self.cfg.status_timeout + 1.0)
                 self._poll_failures = 0
             except asyncio.CancelledError:
@@ -617,9 +630,53 @@ class GoProCamera:
                 except TimeoutError:
                     pass
 
+    def _kick_usb_attach(self) -> None:
+        if self._usb_attach_task is not None and not self._usb_attach_task.done():
+            return
+        if time.monotonic() < self._next_usb_try:
+            return
+        self._next_usb_try = time.monotonic() + 2.0
+        self._usb_attach_task = asyncio.create_task(self._attach_usb(), name="gopro-usb-attach")
+
+    async def _attach_usb(self) -> None:
+        """USB transport running on BLE only: add the HTTP channel once the camera's USB link is up."""
+        from gopro_camera.transports.usb import detect_usb_serial_suffixes, open_usb
+
+        tcfg = self.cfg.transport
+        if not tcfg.usb_base_url and not await asyncio.to_thread(detect_usb_serial_suffixes, tcfg.usb_interface):
+            return
+        try:
+            usb = await open_usb(tcfg)
+        except GoProError as e:
+            logger.info("USB link present but not usable yet: %s", e)
+            return
+        if self.bundle is None or self.bundle.http is not None:
+            await usb.close()
+            return
+        self.bundle.http = usb.http
+        self.bundle.sdk_objects.extend(usb.sdk_objects)
+        if self.cfg.claim_control:
+            try:
+                await self._exec("claim control", lambda ch: ch.set_camera_control_external(), only="http")
+            except GoProError as e:
+                logger.warning("could not claim external control over USB: %s", e)
+        logger.info("USB attached: HTTP control, media and stream available")
+        self.listener.on_link(self, True, "USB attached")
+
+    def _kick_sidechannel_reopen(self) -> None:
+        """Retry the BLE side channel in the background (a BLE connect takes up to minutes: it must not
+        stall status polling) at most every 30 s."""
+        if self._sidechannel_task is not None and not self._sidechannel_task.done():
+            return
+        if time.monotonic() < self._next_sidechannel_try:
+            return
+        self._sidechannel_task = asyncio.create_task(self._maybe_reopen_sidechannel(), name="gopro-ble-reopen")
+        self._side_tasks.add(self._sidechannel_task)
+        self._sidechannel_task.add_done_callback(self._side_tasks.discard)
+
     async def _maybe_reopen_sidechannel(self) -> None:
-        """Retry the separate BLE side channel (USB transport) at most every 30 s."""
-        if self.bundle is None or self.bundle.name != "usb" or time.monotonic() < self._next_sidechannel_try:
+        """Retry the separate BLE side channel (USB transport)."""
+        if self.bundle is None or self.bundle.name != "usb":
             return
         self._next_sidechannel_try = time.monotonic() + 30.0
         from gopro_camera.transports import open_ble_channel
