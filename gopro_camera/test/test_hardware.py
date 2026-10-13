@@ -29,6 +29,18 @@ pytestmark = pytest.mark.hardware
 log = logging.getLogger("gopro_hw_test")
 
 
+@pytest.fixture(autouse=True)
+def _propagate_logs():
+    """Let pytest's live logging (-o log_cli=true) show test and driver logs (not the SDK's per-request dumps).
+
+    The launch_testing pytest plugin imports ``launch.logging``, whose logger class sets
+    ``propagate = False`` on every logger created afterwards, hiding them from pytest's root handlers.
+    """
+    for name, lg in list(logging.root.manager.loggerDict.items()):
+        if isinstance(lg, logging.Logger) and name.startswith("gopro"):
+            lg.propagate = True
+
+
 def _camera() -> GoProCamera:
     tcfg = TransportConfig(
         transport=os.environ.get("GOPRO_TRANSPORT", "usb"),

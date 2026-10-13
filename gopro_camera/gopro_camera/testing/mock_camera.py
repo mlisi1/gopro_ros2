@@ -56,7 +56,16 @@ class MockState:
     wired_usb: bool = False
     asleep: bool = False
     next_index: int = 1
-    busy_time: float = 0.3
+    # Timing as measured on a HERO13 over USB: the shutter-start reply comes once recording runs
+    # (~470 ms; the first frame ~37 ms before the reply), state queries are held while the command is
+    # processed, busy stays 1 for the whole recording, and encoding stays 1 for ~1-2 s after a stop
+    # while the file is finalised. Defaults are shortened to keep tests fast.
+    busy_time: float = 0.3  # shutter start -> encoding
+    shutter_reply_delay: float = 0.0  # encoding -> shutter-start reply
+    stop_finalize_time: float = 0.2  # stop reply -> encoding 0
+    hold_state_during_shutter: bool = True
+    shutter_in_flight: bool = False
+    finalizing: bool = False
     request_log: list[str] = field(default_factory=list)
     presets_loaded: list[int] = field(default_factory=list)
 
@@ -128,8 +137,7 @@ class MockCamera:
         st = self.state
         st.statuses[S.BUSY] = 1
         await asyncio.sleep(st.busy_time)
-        st.statuses[S.BUSY] = 0
-        st.statuses[S.ENCODING] = 1
+        st.statuses[S.ENCODING] = 1  # busy stays 1 while encoding (HERO13)
         st.statuses[S.READY] = 0
         group = st.statuses[S.PRESET_GROUP]
         if group == _group_id("PRESET_GROUP_ID_PHOTO"):
@@ -141,9 +149,27 @@ class MockCamera:
             st.statuses[S.VIDEO_ENCODING_DURATION] = int(time.monotonic() - t0)
             await asyncio.sleep(0.2)
 
+    async def _finalize(self, ext: str) -> None:
+        st = self.state
+        st.finalizing = True
+        try:
+            await asyncio.sleep(st.stop_finalize_time)
+            self._finish_capture(ext)
+        finally:
+            st.finalizing = False
+
+    async def _start_encoding_task(self) -> None:
+        """Start encoding in the background; return once the camera reports encoding (or a photo is done)."""
+        st = self.state
+        st.statuses[S.BUSY] = 1
+        self._spawn(self._start_encoding())
+        while not st.statuses[S.ENCODING] and st.statuses[S.BUSY]:
+            await asyncio.sleep(0.005)
+
     def _finish_capture(self, ext: str) -> None:
         st = self.state
         st.statuses[S.ENCODING] = 0
+        st.statuses[S.BUSY] = 0
         st.statuses[S.READY] = 1
         st.statuses[S.VIDEO_ENCODING_DURATION] = 0
         st.next_index += 1
@@ -159,8 +185,8 @@ class MockCamera:
         def _do() -> None:
             if on and not self.state.statuses[S.ENCODING]:
                 self._spawn(self._start_encoding())
-            elif not on and self.state.statuses[S.ENCODING]:
-                self._finish_capture(".MP4")
+            elif not on and self.state.statuses[S.ENCODING] and not self.state.finalizing:
+                self._spawn(self._finalize(".MP4"))
 
         self._loop.call_soon_threadsafe(_do)
 
@@ -220,6 +246,8 @@ class MockCamera:
 
         @routes.get("/gopro/camera/state")
         async def state(_r: web.Request) -> web.Response:
+            while st.hold_state_during_shutter and st.shutter_in_flight:
+                await asyncio.sleep(0.005)
             return ok(
                 {
                     "status": {str(k): v for k, v in st.statuses.items()},
@@ -235,9 +263,14 @@ class MockCamera:
             if mode == "start":
                 if st.statuses[S.ENCODING] or st.statuses[S.BUSY]:
                     return ok({}, status=500)
-                self._spawn(self._start_encoding())
-            elif st.statuses[S.ENCODING]:
-                self._finish_capture(".MP4")
+                st.shutter_in_flight = True
+                try:
+                    await self._start_encoding_task()
+                    await asyncio.sleep(st.shutter_reply_delay)
+                finally:
+                    st.shutter_in_flight = False
+            elif st.statuses[S.ENCODING] and not st.finalizing:
+                self._spawn(self._finalize(".MP4"))
             return ok()
 
         @routes.get("/gopro/media/hilight/moment")

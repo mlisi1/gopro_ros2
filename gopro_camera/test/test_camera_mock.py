@@ -40,7 +40,8 @@ def test_record_hilight_stop_produces_sync_anchors(make_camera, mock_cam):
         await cam.connect()
         start = await cam.start_recording()
         assert start.success, start.message
-        assert start.command_sent_ns <= start.camera_ack_ns <= start.encoding_changed_ns
+        assert start.command_sent_ns <= start.camera_ack_ns
+        assert start.command_sent_ns <= start.encoding_changed_ns  # may precede the ack (fast polling)
         with pytest.raises(CameraBusy):
             await cam.start_recording()
         hl = await cam.hilight()
@@ -54,6 +55,37 @@ def test_record_hilight_stop_produces_sync_anchors(make_camera, mock_cam):
     kinds = [e.event for e in rec.events]
     assert kinds == [camera_mod.EV_START, camera_mod.EV_HILIGHT, camera_mod.EV_STOP]
     assert mock_cam.state.hilights
+
+
+def test_anchors_with_hero13_timing(make_camera, mock_cam):
+    """HERO13/USB timing: the start reply comes ~470 ms after the command, state queries are held
+    meanwhile, and encoding stays on after a stop while the file is finalised. With 1 Hz idle polling
+    the driver must sample right after the reply (start) and at the fast rate (stop)."""
+    cam, _ = make_camera(status_poll_rate=1.0)
+    mock_cam.state.busy_time = 0.43
+    mock_cam.state.shutter_reply_delay = 0.04
+    mock_cam.state.stop_finalize_time = 0.5
+
+    async def go():
+        await cam.connect()
+        await asyncio.sleep(0.5)  # land mid-way through an idle 1 s poll period
+        start = await cam.start_recording()
+        await asyncio.sleep(1.0)
+        stop = await cam.stop_recording()
+        await cam.disconnect()
+        return start, stop
+
+    start, stop = run(go())
+    for ev in (start, stop):
+        assert ev.success, ev.message
+        assert ev.command_sent_ns <= ev.encoding_changed_ns
+        # capped: the change cannot precede the command
+        assert ev.encoding_changed_uncertainty <= (ev.encoding_changed_ns - ev.command_sent_ns) / 1e9 + 1e-6
+    assert (start.camera_ack_ns - start.command_sent_ns) / 1e9 > 0.4
+    assert (start.encoding_changed_ns - start.camera_ack_ns) / 1e9 < 0.15  # held query answered with the reply
+    assert (stop.encoding_changed_ns - stop.camera_ack_ns) / 1e9 > 0.4  # finalising, not the end of footage
+    assert stop.encoding_changed_uncertainty <= 0.25  # fast polling while waiting for the change
+    assert cam._fast_poll_until == 0.0  # back to the configured rate once the command is confirmed
 
 
 def test_hilight_requires_recording(make_camera):

@@ -3,7 +3,7 @@
 <package format="3">
   <name>gopro_tools</name>
   <version>0.1.0</version>
-  <description>Offline tools for gopro_camera missions: gopro-pull, gopro-gpmf, gopro-align.</description>
+  <description>Offline tools for gopro_camera missions: gopro-pull, gopro-gpmf, gopro-align, gopro-calibrate-sync.</description>
   <maintainer email="elechim2196@gmail.com">mlisi1</maintainer>
   <license>MIT</license>
 
@@ -15,6 +15,8 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>builtin_interfaces</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>  <!-- ArUco clock decoding (gopro-calibrate-sync) -->
+  <exec_depend>python3-yaml</exec_depend>
   <!-- pip-only (no rosdep keys): telemetry-parser, av (PyAV) - see requirements.txt -->
 
   <test_depend>python3-pytest</test_depend>

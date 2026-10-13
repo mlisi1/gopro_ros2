@@ -1,8 +1,11 @@
 """gopro-align: map GoPro video / GPMF time to ROS time using a rosbag2.
 
-Coarse alignment: ``~/recording_event`` anchors recorded in the bag. Video t=0 of a recording is
-taken at the ROS time the driver first observed the camera's *encoding* status flip
-(``encoding_changed``, with ``encoding_changed_uncertainty``); chapters (GX01xxxx, GX02xxxx, ...)
+Coarse alignment: ``~/recording_event`` anchors recorded in the bag. For a START command, video
+t=0 is ``camera_ack + start_offset`` when a sync calibration matches the camera model, transport and
+frame rate (``gopro-calibrate-sync``; HERO13/USB: ~ -37 ms, +-~25 ms). Otherwise it is the ROS time
+the driver first observed the camera's *encoding* status flip (``encoding_changed``, with
+``encoding_changed_uncertainty``; over HTTP this comes ~0.2 s late with ~0.6 s uncertainty, because
+the camera holds state queries while it starts recording). Chapters (GX01xxxx, GX02xxxx, ...)
 follow back to back.
 
 Fine alignment (optional, ``--imu-topic``): cross-correlate the gyro *magnitude* of the GoPro IMU
@@ -27,7 +30,8 @@ from typing import Any
 
 import numpy as np
 
-from gopro_tools.gpmf import Telemetry, extract
+from gopro_tools import sync_calibration as sc
+from gopro_tools.gpmf import Telemetry, extract, video_meta
 
 log = logging.getLogger("gopro-align")
 
@@ -43,7 +47,11 @@ class Recording:
     stop_ns: int = 0
     filename: str = ""  # camera path of the first chapter, e.g. 100GOPRO/GX010042.MP4
     hilights_ns: list[int] = field(default_factory=list)
-    source: str = "event"
+    source: str = "event"  # event | ack | adopted | calibrated
+    transport: str = ""
+    command_sent_ns: int = 0
+    camera_ack_ns: int = 0  # START command acknowledgement (0 for external/adopted recordings)
+    encoding_changed_ns: int = 0
 
     @property
     def file_number(self) -> str | None:
@@ -102,6 +110,10 @@ def recordings_from_events(events: list[Any]) -> list[Recording]:
                 cur = Recording(changed, float(ev.encoding_changed_uncertainty))
             else:  # encoding change not observed: fall back to the command acknowledgement
                 cur = Recording(_ns(ev.camera_ack) or _ns(ev.command_sent), 1.0, source="ack")
+            cur.transport = str(getattr(ev, "transport", ""))
+            cur.encoding_changed_ns = changed
+            if ev.event == START:
+                cur.command_sent_ns, cur.camera_ack_ns = _ns(ev.command_sent), _ns(ev.camera_ack)
         elif ev.event == ADOPTED:
             # Driver started while recording: start = detection - encoding duration (1 s resolution).
             det = _ns(ev.command_sent)
@@ -109,11 +121,32 @@ def recordings_from_events(events: list[Any]) -> list[Recording]:
         elif ev.event == HILIGHT and cur is not None:
             cur.hilights_ns.append(_ns(ev.camera_ack) or _ns(ev.command_sent))
         elif ev.event in (STOP, EXTERNAL_STOP) and cur is not None:
-            cur.stop_ns = _ns(ev.encoding_changed) or _ns(ev.camera_ack)
+            # After a stop command the camera reports encoding for ~1-2 s more while it finalises the
+            # file, so the footage ends near the ack, not at the observed encoding change.
+            if ev.event == STOP:
+                cur.stop_ns = _ns(ev.camera_ack) or _ns(ev.encoding_changed)
+            else:
+                cur.stop_ns = _ns(ev.encoding_changed) or _ns(ev.camera_ack)
             cur.filename = ev.filename
             recs.append(cur)
             cur = None
     return recs
+
+
+def apply_calibration(rec: Recording, cal: sc.SyncCalibration) -> bool:
+    """Anchor a driver-commanded recording at ``camera_ack + start_offset`` (True if applied)."""
+    if not rec.camera_ack_ns:
+        return False
+    start = rec.camera_ack_ns + round(cal.start_offset_s * 1e9)
+    if rec.command_sent_ns and start < rec.command_sent_ns - 50_000_000:
+        log.warning(
+            "%s: calibrated start %.3f s before the command was sent; calibration ignored",
+            rec.filename,
+            (rec.command_sent_ns - start) / 1e9,
+        )
+        return False
+    rec.start_ns, rec.uncertainty, rec.source = start, cal.uncertainty_s, "calibrated"
+    return True
 
 
 # ------------------------------------------------------------------------------------------ xcorr
@@ -168,22 +201,40 @@ def align_recording(
     robot_imu: list[tuple[int, Any]] | None,
     max_lag: float,
     min_peak: float = 0.5,
+    calibrations: list[sc.SyncCalibration] | None = None,
 ) -> tuple[list[ChapterAlignment], dict[str, Any]]:
     number = rec.file_number
     chapters = chapters_for(number, mp4s) if number else []
     if not chapters:
         raise FileNotFoundError(f"no local MP4 for recording {rec.filename or '(unknown file)'}")
+    first_tel = extract(chapters[0])
+    calibration: dict[str, Any] | None = None
+    if calibrations and rec.camera_ack_ns:
+        fps, resolution, firmware = video_meta(chapters[0])
+        info = sc.RecordingInfo(first_tel.model, rec.transport, fps, resolution, firmware)
+        cal = sc.match(calibrations, info)
+        if cal is None:
+            log.info(
+                "%s: no sync calibration for %s/%s %s fps (run gopro-calibrate-sync); using the encoding change",
+                rec.filename,
+                info.model or "?",
+                info.transport or "?",
+                f"{fps:g}" if fps else "?",
+            )
+        elif apply_calibration(rec, cal):
+            calibration = {"entry": cal.describe(), "file": cal.source}
     report: dict[str, Any] = {
         "camera_file": rec.filename,
         "anchor_ns": rec.start_ns,
         "anchor_source": rec.source,
         "anchor_uncertainty_s": rec.uncertainty,
         "chapters": [str(c) for c in chapters],
+        "sync_calibration": calibration,
     }
     aligned: list[ChapterAlignment] = []
     offset_s = 0.0
     for mp4 in chapters:
-        tel = extract(mp4)
+        tel = first_tel if mp4 == chapters[0] else extract(mp4)
         aligned.append(ChapterAlignment(mp4, rec.start_ns + int(offset_s * 1e9), tel))
         offset_s += tel.duration
     report["duration_s"] = offset_s
@@ -309,8 +360,19 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out-bag", type=Path, default=None, help="write GoPro IMU/GPS (+frames) bag here")
     ap.add_argument("--frame-stride", type=int, default=0, help="write every Nth frame as JPEG (0 = none)")
     ap.add_argument("--frame-id", default="gopro_optical_frame")
+    ap.add_argument(
+        "--sync-calibration",
+        type=Path,
+        action="append",
+        default=None,
+        help="calibration YAML (repeatable); default: packaged defaults + ~/.ros/gopro/sync_calibration.yaml",
+    )
+    ap.add_argument("--no-sync-calibration", action="store_true", help="anchor on the observed encoding change")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    calibrations = None
+    if not args.no_sync_calibration:
+        calibrations = sc.load(args.sync_calibration or sc.default_files())
 
     topics = [args.event_topic] + ([args.imu_topic] if args.imu_topic else [])
     data = read_topics(args.bag, topics)
@@ -325,7 +387,9 @@ def main(argv: list[str] | None = None) -> None:
             lo, hi = rec.start_ns - 10_000_000_000, (rec.stop_ns or rec.start_ns) + 10_000_000_000
             robot_imu = [(t, m) for t, m in data[args.imu_topic] if lo <= t <= hi]
         try:
-            chapters, report = align_recording(rec, args.mp4, robot_imu, args.max_lag, args.min_peak)
+            chapters, report = align_recording(
+                rec, args.mp4, robot_imu, args.max_lag, args.min_peak, calibrations=calibrations
+            )
         except FileNotFoundError as e:
             log.warning("%s", e)
             continue

@@ -72,6 +72,17 @@ def _video_info(path: Path) -> tuple[float, list[float], str]:
     return dur, pts, created
 
 
+def video_meta(path: str | Path) -> tuple[float | None, str, str]:
+    """(frame rate, 'WxH', camera firmware) of an MP4; GoPro stores the firmware as a metadata tag."""
+    import av
+
+    with av.open(str(path)) as c:
+        vs = c.streams.video[0]
+        rate = vs.average_rate or vs.guessed_rate
+        fps = round(float(rate), 3) if rate else None
+        return fps, f"{vs.width}x{vs.height}", str(c.metadata.get("firmware", ""))
+
+
 def _gps_from_blocks(telemetry: list[dict[str, Any]]) -> list[GpsSample]:
     out: list[GpsSample] = []
     blocks = []

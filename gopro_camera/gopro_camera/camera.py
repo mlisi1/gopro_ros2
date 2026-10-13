@@ -40,6 +40,8 @@ from gopro_camera.transports.base import Channel, ensure_private_file
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
+FAST_POLL_PERIOD = 0.1  # [s] status poll period while a command waits for a state change
+
 # RecordingEvent.msg constants (kept in sync by test_camera.py)
 EV_START, EV_STOP, EV_HILIGHT, EV_PHOTO, EV_ADOPTED, EV_EXTERNAL_START, EV_EXTERNAL_STOP = range(7)
 
@@ -184,6 +186,7 @@ class GoProCamera:
         self._reconnect_task: asyncio.Task[None] | None = None
         self._state_cond: asyncio.Condition | None = None
         self._fast_poll_until = 0.0
+        self._poll_wake: asyncio.Event | None = None
         self._poll_failures = 0
         self._last_obs_ns = 0
         self._enc_transition: tuple[bool, int, float] | None = None  # (new value, t_ns, uncertainty)
@@ -256,6 +259,7 @@ class GoProCamera:
         if self._state_cond is None:
             self._state_cond = asyncio.Condition()
             self._connect_lock = asyncio.Lock()
+            self._poll_wake = asyncio.Event()
 
     async def connect(self) -> None:
         """Open transport, claim control, read hardware info and state, start background tasks."""
@@ -519,13 +523,23 @@ class GoProCamera:
         except GoProError:
             pass
 
+    def _begin_fast_poll(self, duration: float) -> None:
+        """Poll at FAST_POLL_PERIOD for ``duration`` seconds, starting now (interrupts the poll loop's wait)."""
+        self._ensure_sync()
+        assert self._poll_wake is not None
+        self._fast_poll_until = max(self._fast_poll_until, time.monotonic() + duration)
+        if not self._ble_push_active:
+            self._poll_wake.set()
+
+    def _end_fast_poll(self) -> None:
+        self._fast_poll_until = 0.0
+
     async def _poll_loop(self) -> None:
+        self._ensure_sync()
+        assert self._poll_wake is not None
         while True:
-            fast = time.monotonic() < self._fast_poll_until
-            base = 1.0 / max(self.cfg.status_poll_rate, 0.01)
-            if self._ble_push_active:
-                base = max(base, 5.0)  # statuses arrive by push; poll only for settings / liveness
-            period = 0.2 if fast else base
+            self._poll_wake.clear()
+            started = time.monotonic()
             try:
                 if self.ble is not None and not self.ble.is_connected:
                     if self.http is None:
@@ -544,7 +558,22 @@ class GoProCamera:
                 if self._poll_failures >= self.cfg.link_loss_threshold:
                     await self._on_link_lost(f"{self._poll_failures} consecutive status failures: {e}")
                     return
-            await asyncio.sleep(period)
+            # Period measured from the start of the query, so fast polling is not slowed by its round-trip.
+            # _begin_fast_poll() cuts the wait short so a command's state change is sampled right away.
+            if time.monotonic() < self._fast_poll_until and not self._ble_push_active:
+                # (with BLE push the transition arrives by notification; extra polls would only
+                # compete with the command for the link)
+                period = FAST_POLL_PERIOD
+            else:
+                period = 1.0 / max(self.cfg.status_poll_rate, 0.01)
+                if self._ble_push_active:
+                    period = max(period, 5.0)  # statuses arrive by push; poll only for settings / liveness
+            remaining = started + period - time.monotonic()
+            if remaining > 0:
+                try:
+                    await asyncio.wait_for(self._poll_wake.wait(), remaining)
+                except TimeoutError:
+                    pass
 
     async def _maybe_reopen_sidechannel(self) -> None:
         """Retry the separate BLE side channel (USB transport) at most every 30 s."""
@@ -588,10 +617,14 @@ class GoProCamera:
                     logger.debug("keep alive over %s failed: %s", self._label(ch), e)
 
     async def wait_for_encoding(self, target: bool, since_ns: int, timeout: float) -> tuple[int, float] | None:
-        """Wait until the camera reports encoding == target (transition after ``since_ns``)."""
+        """Wait until the camera reports encoding == target (transition after ``since_ns``).
+
+        Returns (observed_ns, uncertainty_s). The change cannot precede ``since_ns`` (the command), so
+        the uncertainty is capped at the time from the command to the observation.
+        """
         self._ensure_sync()
         assert self._state_cond is not None
-        self._fast_poll_until = time.monotonic() + timeout
+        self._begin_fast_poll(timeout)
         deadline = time.monotonic() + timeout
 
         def _done() -> bool:
@@ -608,7 +641,8 @@ class GoProCamera:
                 except TimeoutError:
                     return None
         assert self._enc_transition is not None
-        return self._enc_transition[1], self._enc_transition[2]
+        _, t_ns, uncertainty = self._enc_transition
+        return t_ns, min(uncertainty, max(t_ns - since_ns, 0) / 1e9)
 
     async def _require_idle(self, what: str, allow_encoding: bool = False) -> None:
         await self.ensure_connected()
@@ -618,7 +652,7 @@ class GoProCamera:
         if self.busy:
             self._ensure_sync()
             assert self._state_cond is not None
-            self._fast_poll_until = time.monotonic() + self.cfg.busy_wait_timeout
+            self._begin_fast_poll(self.cfg.busy_wait_timeout)
             deadline = time.monotonic() + self.cfg.busy_wait_timeout
             async with self._state_cond:
                 while self.busy:
@@ -669,6 +703,14 @@ class GoProCamera:
         except Exception:
             return ""
 
+    def _capture_poll_window(self) -> float:
+        """Fast-poll from before the shutter command until its encoding change can be confirmed.
+
+        The camera may flip *encoding* before it answers the command (HERO13 over USB answers after
+        ~450 ms), so sampling must already be fast while the command is in flight.
+        """
+        return self.cfg.transport.command_timeout + self.cfg.encoding_confirm_timeout
+
     def _check_sd(self, what: str) -> None:
         sd = as_int(self.statuses.get(S.PRIMARY_STORAGE), SD_UNKNOWN)
         if sd not in (SD_OK, SD_UNKNOWN):
@@ -685,6 +727,7 @@ class GoProCamera:
         self._check_sd("start recording")
         await self._require_idle("start recording")
         ev = RecordingEventData(event=EV_START)
+        self._begin_fast_poll(self._capture_poll_window())
         self._expected_encoding = True
         try:
             ev.command_sent_ns = self.now_ns()
@@ -693,6 +736,7 @@ class GoProCamera:
             obs = await self.wait_for_encoding(True, ev.command_sent_ns, self.cfg.encoding_confirm_timeout)
         finally:
             self._expected_encoding = None
+            self._end_fast_poll()
         if obs is None:
             ev.success = False
             ev.message = f"camera acknowledged but encoding not observed within {self.cfg.encoding_confirm_timeout}s"
@@ -707,6 +751,7 @@ class GoProCamera:
         if not self.encoding:
             raise CameraRejected("stop recording: camera is not encoding", self.context())
         ev = RecordingEventData(event=EV_STOP)
+        self._begin_fast_poll(self._capture_poll_window())
         self._expected_encoding = False
         try:
             ev.command_sent_ns = self.now_ns()
@@ -715,6 +760,7 @@ class GoProCamera:
             obs = await self.wait_for_encoding(False, ev.command_sent_ns, self.cfg.encoding_confirm_timeout)
         finally:
             self._expected_encoding = None
+            self._end_fast_poll()
         ev.encoding_duration = self._last_encoding_duration
         if obs is None:
             ev.success = False
@@ -736,6 +782,7 @@ class GoProCamera:
         self._check_sd("take photo")
         await self._require_idle("take photo")
         ev = RecordingEventData(event=EV_PHOTO)
+        self._begin_fast_poll(self._capture_poll_window())
         self._expected_encoding = True
         try:
             ev.command_sent_ns = self.now_ns()
@@ -748,6 +795,7 @@ class GoProCamera:
                 await self.wait_for_encoding(False, ev.encoding_changed_ns, self.cfg.encoding_confirm_timeout)
         finally:
             self._expected_encoding = None
+            self._end_fast_poll()
         ev.message = "photo captured" if obs is not None else "camera acknowledged; capture not observed"
         ev.success = obs is not None
         ev.filename = await self._last_captured_retry()

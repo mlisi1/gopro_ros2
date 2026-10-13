@@ -12,7 +12,7 @@ It records high-quality footage to the SD card while ROS gets control, typed sta
 |---|---|---|
 | `gopro_camera_interfaces` | ament_cmake | `Status`, `RecordingEvent`, `HardwareInfo`, settings/preset/media messages, services, `DownloadMedia` / `ProvisionCohn` actions |
 | `gopro_camera` | ament_python | lifecycle driver node, transports (USB, Wi-Fi AP, COHN, BLE), stream pipeline, fake camera for tests |
-| `gopro_tools` | ament_python | `gopro-pull`, `gopro-gpmf`, `gopro-align` offline tools |
+| `gopro_tools` | ament_python | `gopro-pull`, `gopro-gpmf`, `gopro-align`, `gopro-calibrate-sync` offline tools |
 
 ## Install
 
@@ -130,8 +130,22 @@ python3 gopro_camera/scripts/generate_spec_tables.py   # downloads https://gopro
 ## Time synchronisation model
 
 - On connect the camera clock is set from the host clock with timezone/DST (`sync_datetime`, ~1 s resolution); the service reports the camera-host offset.
-- Each START/STOP records: `command_sent` (ROS time before sending), `camera_ack` (reply received), and `encoding_changed` - the first time the driver saw the *encoding* status flip, with `encoding_changed_uncertainty` (time since the previous status sample; ~0 with BLE push, ≤ poll period with HTTP polling, sped up to 5 Hz while a command waits).
-- `gopro-align` maps video `t=0` to `encoding_changed`, then optionally refines by cross-correlating the GoPro gyro (GPMF) with a robot IMU. That is the path for accurate offline alignment.
+- Each START/STOP records: `command_sent` (ROS time before sending), `camera_ack` (reply received), and `encoding_changed` - the first time the driver saw the *encoding* status flip, with `encoding_changed_uncertainty` (time since the previous status sample, capped at the time since the command was sent; ~0 with BLE push; with HTTP polling the driver polls at 10 Hz from just before the shutter command until the change is confirmed).
+- Measured on a HERO13 Black over USB (5.3K30, firmware H24.01.02.04.00): the camera answers shutter-start only once recording runs (~470 ms) and **holds state queries meanwhile**, so over HTTP `encoding_changed` arrives ~0.2 s after the first frame with ~0.6 s uncertainty. The ack, however, is a stable reference: **first frame ≈ `camera_ack` - 37 ms (sd ~7 ms)**. After shutter-stop the ack comes in ~40 ms but *encoding* stays on for 1-2 s while the file is finalised, so for STOP `encoding_changed` is the end of finalisation, not of the footage; `busy` stays 1 for the whole recording.
+- `gopro-align` maps video `t=0` to `camera_ack + start_offset` when a **sync calibration** matches (model, transport, frame rate; see below), otherwise to `encoding_changed`; then it optionally refines by cross-correlating the GoPro gyro (GPMF) with a robot IMU, searching within the anchor's uncertainty.
+
+### Sync calibration (`gopro-calibrate-sync`)
+
+The start offset depends on the camera configuration (model, firmware, frame rate, resolution, possibly HyperSmooth) and transport, so measure it for the configuration you record missions with. `gopro_tools` ships one default (the HERO13/USB/5.3K30 measurement above); results you measure go to `~/.ros/gopro/sync_calibration.yaml` and take precedence.
+
+1. Stop the driver node. Set the camera as for a mission; **HindSight off** (it would prepend footage from before the command). Higher frame rates resolve the start more finely.
+2. Run the tool. In Docker, use the `driver` service (host network, `~/.ros/gopro` mounted so the result lands in the host's file): `docker compose -f docker/compose.yaml run --rm driver ros2 run gopro_tools gopro-calibrate-sync --out /root/gopro_media/calibration` (the `--out` keeps the per-run details in the host's `~/gopro_media`). Natively:
+   ```bash
+   ros2 run gopro_tools gopro-calibrate-sync --n 10 --stream-latency 20
+   ```
+3. Open `http://localhost:8765/` on a screen of the same host, full screen, and point the camera at it (the three markers large in the frame, no glare); press Enter.
+
+The page shows the host clock as three ArUco markers (seconds, milliseconds, checksum), redrawn every display refresh. The tool records `--n` short videos, decodes the clock in the first frames of each, and reports *first frame - ack* per recording, then saves mean and uncertainty (2 sd combined with `--display-lag-uncertainty-ms`, default 20 ms: the monitor shows each value slightly late; pass `--display-lag-ms` if you know your display's lag). `--stream-latency N` also measures the webcam stream latency for N seconds and prints the value for `stream.latency_offset`. Details per run go to `~/gopro_calibration/<date>/` (`recordings.csv`, `summary.json`).
 
 ## Live stream
 
@@ -142,7 +156,7 @@ Webcam mode (USB/COHN; over Wi-Fi only on HERO12+ per the spec) or preview (Wi-F
 
 Frames are stamped with **receive time - `stream.latency_offset`**. GoPro stream latency is roughly 1-2 s and varies with mode/resolution/link: **the stream is not suitable for tight sensor fusion.** Use it for monitoring; use SD footage + `recording_event` + `gopro-align` for data.
 
-**Stream latency.** Measure it for your configuration: point the camera at a screen showing ROS time (e.g. `ros2 topic echo /clock` or a stopwatch synced to the host), record `~/image_raw` in a bag, and compare the displayed time in a frame with the frame's receive time; set `stream.latency_offset` to the median. `test_hardware.py::test_stream_60s_latency_and_drops` measures frame rate, dropped frames (PTS gaps) and jitter.
+**Stream latency.** Measure it for your configuration with `gopro-calibrate-sync --n 0 --stream-latency 30` (see *Sync calibration*): it decodes the on-screen clock in the received frames and prints the median receive-minus-shown time; set `stream.latency_offset` to it. `test_hardware.py::test_stream_60s_latency_and_drops` measures frame rate, dropped frames (PTS gaps) and jitter.
 
 ### Calibration
 
@@ -167,7 +181,11 @@ ros2 run gopro_tools gopro-gpmf media/100GOPRO/GX010042.MP4 --out telemetry/
 # Align with the bag; refine with the robot IMU; write a bag with GoPro IMU/GPS and every 30th frame
 ros2 run gopro_tools gopro-align mission_bag/ media/100GOPRO/GX01*.MP4 media/100GOPRO/GX02*.MP4 \
   --imu-topic /imu/data --out aligned/ --out-bag gopro_aligned_bag --frame-stride 30
+
+# Measure the start-sync offset (and stream latency) for the current camera configuration
+ros2 run gopro_tools gopro-calibrate-sync --n 10 --stream-latency 20
 ```
+`gopro-align` reads the packaged calibrations plus `~/.ros/gopro/sync_calibration.yaml` (`--sync-calibration FILE` to choose, `--no-sync-calibration` to anchor on `encoding_changed`); `alignment.json` reports which anchor and calibration each recording used.
 GPMF parsing uses [`telemetry-parser`](https://github.com/AdrianEddy/telemetry-parser) (MIT/Apache-2.0, x86_64 and aarch64 wheels); GoPro's `gpmf-parser` bindings (`py-gpmf-parser`) were considered but ship x86_64 wheels only.
 
 ## Testing
