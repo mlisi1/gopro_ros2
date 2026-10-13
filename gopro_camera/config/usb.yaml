@@ -1,0 +1,35 @@
+# USB (wired) transport: power + control + webcam stream over the USB NCM interface.
+/**:
+  ros__parameters:
+    transport: usb
+    serial: ""                 # last 3+ digits; empty = auto-detect the NCM link / mDNS
+    ble_sidechannel: false     # true: also BLE for push status, wake, AP/COHN/livestream control
+    claim_control: true
+    on_connect:
+      sync_datetime: true
+      load_preset: "video"     # preset id or group (video|photo|timelapse); "" = leave as is
+      apply_settings: true
+    status:
+      poll_rate: 1.0
+    keep_alive_period: 3.0
+    stream:
+      enabled: true
+      mode: webcam
+      protocol: TS
+      resolution: "1080p"
+      fov: "Linear"
+      port: 8554
+      publish_raw: true
+      publish_h264: true
+      max_rate: 10.0
+      scale: 0.5
+      latency_offset: 1.5      # measure for your setup (README, "Stream latency")
+    camera_info_url: ""        # e.g. file:///home/robot/calib/gopro_1080p_linear.yaml
+    media:
+      download_dir: ~/gopro_media
+    settings:                  # spec labels or option ids; unset = untouched
+      video_resolution: "4K"
+      frames_per_second: "30"
+      hypersmooth: "Off"
+      gps: "On"
+      auto_power_down: "Never"

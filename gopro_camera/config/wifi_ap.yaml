@@ -1,0 +1,11 @@
+# Wi-Fi AP: the host joins the camera's access point (enabled over BLE). Slow, short range.
+/**:
+  ros__parameters:
+    transport: wifi_ap
+    serial: ""
+    wifi_ap:
+      interface: wlan0
+    stream:
+      enabled: false
+      mode: preview
+      port: 8554

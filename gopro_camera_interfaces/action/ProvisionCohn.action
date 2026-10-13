@@ -1,0 +1,9 @@
+string ssid
+string password
+bool force_reprovision
+---
+bool success
+string message
+CohnStatus status
+---
+string stage

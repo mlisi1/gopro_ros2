@@ -1,0 +1,9 @@
+# Run against the fake camera: ros2 run gopro_camera mock_camera --port 8080
+/**:
+  ros__parameters:
+    transport: usb
+    usb_base_url: http://127.0.0.1:8080/
+    on_connect:
+      sync_datetime: true
+    settings:
+      video_resolution: "1080"

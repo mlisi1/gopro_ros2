@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>gopro_tools</name>
+  <version>0.1.0</version>
+  <description>Offline tools for gopro_camera missions: gopro-pull, gopro-gpmf, gopro-align.</description>
+  <maintainer email="elechim2196@gmail.com">mlisi1</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>gopro_camera</exec_depend>
+  <exec_depend>gopro_camera_interfaces</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- pip-only (no rosdep keys): telemetry-parser, av (PyAV) - see requirements.txt -->
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

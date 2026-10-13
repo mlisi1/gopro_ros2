@@ -1,0 +1,7 @@
+string[] paths          # camera paths folder/file
+bool confirm            # must be true, otherwise nothing is deleted
+---
+bool success
+string message
+string[] deleted
+string[] failed

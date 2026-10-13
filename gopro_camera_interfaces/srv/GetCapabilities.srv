@@ -1,0 +1,7 @@
+---
+bool success
+string message
+HardwareInfo hardware
+SettingCapability[] settings
+string[] features            # driver features available with the current transports
+string[] transports_active

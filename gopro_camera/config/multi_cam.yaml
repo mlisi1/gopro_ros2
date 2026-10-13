@@ -1,0 +1,14 @@
+# One node per camera, one namespace per camera (identified by serial).
+# ros2 launch gopro_camera multi_cam.launch.py config:=<this file>
+cameras:
+  - namespace: gopro_front
+    params: usb.yaml          # relative to this file's directory, or absolute
+    overrides:
+      serial: "123"
+      stream.port: 8554
+  - namespace: gopro_rear
+    params: usb.yaml
+    overrides:
+      serial: "456"
+      stream.port: 8556
+      usb_interface: ""

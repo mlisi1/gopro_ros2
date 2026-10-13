@@ -1,0 +1,8 @@
+string path             # camera path folder/file
+string kind             # thumbnail | screennail | gpmf | telemetry | info
+string local_path       # "" = media.download_dir/<kind>/<file>
+---
+bool success
+string message
+string local_file
+string info_json        # for kind == info

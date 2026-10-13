@@ -1,0 +1,11 @@
+# RTMP livestream (configured over BLE as the spec requires; the camera must be connected to a network, e.g. via COHN provisioning).
+string url
+int32 minimum_bitrate 800
+int32 maximum_bitrate 8000
+int32 starting_bitrate 1000
+bool encode                  # also record to SD while streaming
+int32 window_size -1         # spec EnumWindowSize value, -1 = camera default
+int32 lens -1                # spec EnumLens value, -1 = camera default
+---
+bool success
+string message

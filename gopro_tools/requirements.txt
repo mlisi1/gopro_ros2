@@ -1,0 +1,3 @@
+# pip-only dependencies (see README): GPMF parsing
+telemetry-parser>=0.3.0
+av>=12  # PyAV: frame timestamps / JPEG export (no rosdep key exists for it)

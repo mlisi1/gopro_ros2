@@ -1,0 +1,19 @@
+# Files to download. If empty, download every file created after `since` / mission start.
+string[] paths
+bool since_mission_start
+builtin_interfaces/Time since
+string destination           # "" = media.download_dir
+bool skip_existing           # skip files already present locally with the same size
+bool no_turbo                # don't enable turbo transfer (where available)
+---
+bool success
+string message
+string[] downloaded
+string[] failed
+---
+string current_file
+uint32 file_index
+uint32 file_count
+uint64 bytes_done
+uint64 bytes_total
+float32 overall_progress     # 0..1

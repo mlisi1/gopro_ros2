@@ -1,0 +1,12 @@
+# GoPro USB NCM network interface (Open GoPro wired control).
+#
+# When "wired USB control" is enabled the camera enumerates as a USB CDC-NCM network device
+# (USB vendor 2672 = GoPro, per the usb.ids database). The kernel names it enx<mac>, which is
+# already stable per camera. This rule only makes sure NetworkManager manages the link so the host
+# gets its DHCP address (172.2X.1YZ.5x/24, where XYZ are the last 3 serial digits), and tags it so it
+# is easy to find:   udevadm info /sys/class/net/<if> | grep GOPRO_NCM
+#
+# Install:
+#   sudo cp 99-gopro-ncm.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=net
+SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2672", ENV{NM_UNMANAGED}="0", ENV{GOPRO_NCM}="1"

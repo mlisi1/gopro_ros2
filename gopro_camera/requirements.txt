@@ -1,0 +1,4 @@
+# Python dependencies not available as rosdep keys. Install into a venv created with
+# --system-site-packages (see README) or with pip --user.
+open_gopro==0.22.0
+av>=12  # PyAV: stream receive/decode (no rosdep key exists for it)

@@ -1,0 +1,11 @@
+# Apply a batch of settings. Validated first; applied in order; on failure, already-applied
+# settings are rolled back to their previous options unless no_rollback is true.
+SettingValue[] settings
+bool no_rollback
+---
+bool success
+string message
+SettingValue[] applied
+SettingValue[] failed
+string[] errors
+bool rolled_back

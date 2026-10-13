@@ -1,0 +1,16 @@
+# COHN: the camera joins the robot network; HTTPS with stored credentials.
+# Provision once (camera reachable over BLE):
+#   ros2 action send_goal /gopro/provision_cohn gopro_camera_interfaces/action/ProvisionCohn \
+#     "{ssid: robot_ap, password: secret}" --feedback
+/**:
+  ros__parameters:
+    transport: cohn
+    serial: "C3501324500123"   # required: credentials are stored per camera
+    ble_sidechannel: true      # keeps IP/credentials fresh, push status, wake from sleep
+    cohn_credentials_path: ~/.ros/gopro/cohn_credentials.json
+    stream:
+      enabled: false
+      mode: webcam
+    settings:
+      video_resolution: "4K"
+      frames_per_second: "30"

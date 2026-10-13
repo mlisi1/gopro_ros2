@@ -1,0 +1,7 @@
+# Load a preset by ID, or (if preset_id < 0) the last-used preset of a group.
+int32 preset_id -1
+string group            # "video" | "photo" | "timelapse" (spec EnumPresetGroup), or a numeric group id
+---
+bool success
+string message
+int32 active_preset_id

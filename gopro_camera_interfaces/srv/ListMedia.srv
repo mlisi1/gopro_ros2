@@ -1,0 +1,6 @@
+bool since_mission_start           # only files created after the driver's mission start (node configure time)
+builtin_interfaces/Time since      # if non-zero, only files created at/after this time (camera clock, synced on connect)
+---
+bool success
+string message
+MediaItem[] items

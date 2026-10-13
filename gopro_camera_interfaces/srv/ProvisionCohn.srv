@@ -1,0 +1,9 @@
+# Connect the camera to an access point and provision COHN (requires BLE). Credentials are persisted
+# to the cohn_credentials_path parameter with 0600 permissions.
+string ssid
+string password
+bool force_reprovision
+---
+bool success
+string message
+CohnStatus status

@@ -1,0 +1,5 @@
+# Shutter / hilight command with a sync-anchor response.
+---
+bool success
+string message
+RecordingEvent event

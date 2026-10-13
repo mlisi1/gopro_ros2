@@ -1,0 +1,6 @@
+bool include_hidden
+---
+bool success
+string message
+int32 active_preset_id
+PresetGroup[] groups

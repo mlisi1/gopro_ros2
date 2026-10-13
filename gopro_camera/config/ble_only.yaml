@@ -1,0 +1,10 @@
+# BLE only: control, settings, push status. No stream, no media download.
+/**:
+  ros__parameters:
+    transport: ble
+    ble_name: ""               # e.g. "GoPro 1234"; or set serial
+    serial: ""
+    status:
+      use_ble_push: true
+    stream:
+      enabled: false

@@ -1,0 +1,11 @@
+line-length = 120
+target-version = "py312"
+extend-exclude = ["build", "install", "log"]
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+ignore = ["RUF012"]
+
+[lint.per-file-ignores]
+"gopro_camera/gopro_camera/spec_tables.py" = ["E501", "RUF001"]
+"**/test/**" = ["B011"]

@@ -1,0 +1,54 @@
+# Usage (from the repository root):
+#   docker compose -f docker/compose.yaml run --rm test          # lint + all tests, no hardware
+#   docker compose -f docker/compose.yaml run --rm dev           # shell with the source bind-mounted
+#   GOPRO_CONFIG=usb.yaml docker compose -f docker/compose.yaml up driver   # real camera
+name: gopro_ros2
+
+x-image: &image
+  image: gopro_ros2:jazzy
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    args:
+      ROS_DISTRO: jazzy
+      FETCH_SAMPLE: "1"
+      WITH_WIFI_AP: "0"
+
+services:
+  # Isolated: own network namespace, so DDS and the fake camera never touch the host.
+  test:
+    <<: *image
+    command: ["run_tests"]
+
+  # Interactive development: edit on the host, rebuild/test inside (REBUILD=1 run_tests).
+  dev:
+    <<: *image
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+    environment:
+      REBUILD: "1"
+    volumes:
+      - ..:/ws/src/gopro_ros2
+
+  # Real camera. Host networking is required: the USB NCM link (172.2X.1YZ.0/24), COHN and the
+  # camera's UDP stream all live on host interfaces; ipc=host lets DDS shared memory work with
+  # ROS nodes running on the host. BLE goes through the host's BlueZ over the system D-Bus.
+  driver:
+    <<: *image
+    network_mode: host
+    ipc: host
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+    volumes:
+      - /var/run/dbus:/var/run/dbus            # BlueZ (BLE) and NetworkManager (wifi_ap)
+      - ${HOME}/.ros/gopro:/root/.ros/gopro     # COHN credentials (kept 0600)
+      - ${HOME}/gopro_media:/root/gopro_media   # media downloads
+      - ./config:/config:ro                     # your parameter files
+    command:
+      - ros2
+      - launch
+      - gopro_camera
+      - gopro.launch.py
+      - config:=/config/${GOPRO_CONFIG:-usb.yaml}
+      - namespace:=${GOPRO_NAMESPACE:-gopro}
